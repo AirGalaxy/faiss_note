@@ -186,6 +186,8 @@ SearchParameters:搜索参数，后续详细解释
 
 ```
 先检索，再对召回的向量进行重建
+还有一些reconstruct的函数这里就不在详细描述了，基本上都是批量重建的接口，内部使用OpenMP进行多线程的处理，区别是传入是制定的ids还是一个id范围[i0, i0 + ni]
+
 
 ```c++
     /** Computes a residual vector after indexing encoding.
@@ -202,5 +204,50 @@ SearchParameters:搜索参数，后续详细解释
     virtual void compute_residual(const float* x, float* residual, idx_t key)
             const;
 ```
+计算残差。需要传入原始的向量x，以及x被量化后的id，先对id进行重建，然后计算重建向量与原始向量的残差。
+当然他也有个compute_residual_n的版本，与上面的重建多个向量的接口完全一致，不在赘述。
+
+接下来看下编解码器接口
+```c++
+    /** 每个向量占用多少个byte？ */
+    virtual size_t sa_code_size() const;
+
+    /** encode a set of vectors
+     *
+     * @param n       number of vectors
+     * @param x       input vectors, size n * d
+     * @param bytes   output encoded vectors, size n * sa_code_size()
+     */
+    virtual void sa_encode(idx_t n, const float* x, uint8_t* bytes) const;
+
+    /** decode a set of vectors
+     *
+     * @param n       number of vectors
+     * @param bytes   input encoded vectors, size n * sa_code_size()
+     * @param x       output vectors, size n * d
+     */
+    virtual void sa_decode(idx_t n, const uint8_t* bytes, float* x) const;
+```
+sa_encode为编码接口，把n个向量编码成长为n * sa_code_size()的byte数组  
+sa_decode为解码接口，把长为n * sa_code_size()的byte数组解码为float数组
+
+合并两个Index的接口：
+```c++
+    /** moves the entries from another dataset to self.
+     * On output, other is empty.
+     * add_id is added to all moved ids
+     * (for sequential ids, this would be this->ntotal) */
+    virtual void merge_from(Index& otherIndex, idx_t add_id = 0);
+
+    /** check that the two indexes are compatible (ie, they are
+     * trained in the same way and have the same
+     * parameters). Otherwise throw. */
+    virtual void check_compatible_for_merge(const Index& otherIndex) const;
+```
+check_compatible_for_merge()检查另一个索引能不能合并进来，merge_from()执行真正的合并
+
+# 2. 总结
+Index这个基类终于介绍完了，从接口上看，Index类定义了增(add方法)、删(remove方法)、查(search方法)，还有一些辅助方法(编解码、重建向量)。  
+从编码风格上看，fassi库在批量传递向量时使用裸指针 + 长度的方式，在后面存储、处理向量的集合上全部使用了这种风格，基本上不使用二维数组/指针的指针形式传递参数。后面也可以看到就算使用了标准库容器，更多的也只是作为RAII的一种实现，真正处理还是操作类似std::vector::data()暴露的裸指针。
 
 
