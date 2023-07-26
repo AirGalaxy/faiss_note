@@ -29,10 +29,12 @@ struct Level1Quantizer {
     bool own_fields = false;
     // 聚类时使用的index
     Index* clustering_index = nullptr;
+    // 聚类的一些参数
+    ClusteringParameters cp;
 }
 ```
 这里解答原来的一个疑惑，为何quantizer是Index类型？难道Index也是一种量化器吗？  
-如果我们把通过物料向量聚类得到的聚类中心向量加入到Index中，再在该Index上搜索离输入向量最近的向量，用搜索结果代替元素输入向量，这样我们就可以把输入向量量化到某个聚类中心上，从这个角度上看，把Index作为一种量化器是很自然而合理的事。
+如果我们把通过物料向量聚类得到的聚类中心向量加入到Index中，再在该Index上搜索离输入向量最近的向量，用搜索结果代替原始的输入向量，这样我们就可以把输入向量量化到某个聚类中心上，从这个角度上看，把Index作为一种量化器是很自然而合理的事。
 
 接下来考察其成员函数
 ```c++
@@ -41,7 +43,7 @@ struct Level1Quantizer {
             MetricType metric_type) {
         size_t d = quantizer->d;
         if (quantizer_trains_alone == 1) {
-            //单纯训练quantizer，
+            //单纯训练quantizer
             quantizer->train(n, x);
         } else if (quantizer_trains_alone == 0) {
             //新建一个Clustering，接下来介绍
@@ -60,7 +62,7 @@ struct Level1Quantizer {
         }  else if (quantizer_trains_alone == 2) {
             Clustering clus(d, nlist, cp);
             if (!clustering_index) {
-                //clustering_index为空，使用IndexFlatL2
+                //clustering_index为空，使用IndexFlatL2作为clus聚类时的index
                 IndexFlatL2 assigner(d);
                 clus.train(n, x, assigner);
             } else {
@@ -71,8 +73,8 @@ struct Level1Quantizer {
                 //使用上面训练出的聚类中心继续训练quantizer
                 quantizer->train(nlist, clus.centroids.data());
             }
-        //聚类中心加入quantizer
-        quantizer->add(nlist, clus.centroids.data());
+            //聚类中心加入quantizer
+            quantizer->add(nlist, clus.centroids.data());
         }
     }
 ```
@@ -80,4 +82,198 @@ struct Level1Quantizer {
 n:有多少个要训练的向量  
 x:向量数组  
 metric_type:L2/内积/.etc  
-代码结构很清晰，根据quantizer_trains_alone取值走不同的道路
+代码结构很清晰，根据quantizer_trains_alone取值走不同的道路，我们一条一条分支看。  
+1. quantizer_trains_alone = 1的情况，quantizer自己训练就行了，具体训练是做什么在不同的算法对应的类中有不同实现，在IVF中我们可以简单的理解为训练就是计算聚类中心就行了
+
+2. quantizer_trains_alone == 0或2时，新建了Clustering类的对象clus，clus中保存了向量维数d、聚类中心的数量nlist，及聚类时要用到的一些参数cp。最后使用clus.train()来实现训练过程。  
+train()中会调用train_encoded，我们直接看下关键函数train_encoded
+照例先介绍下每个参数:  
+nx:要训练的向量个数  
+x_in:保存向量的数组  
+codec:编/解码器，x_in可能是被编码后的数组，需要codec从数组中解析原始向量  
+index:训练时使用的Index
+weights:训练向量的权重
+```c++
+void Clustering::train_encoded(
+        idx_t nx,const uint8_t* x_in, const Index* codec,Index& index,
+        const float* weights) {
+        if (!codec) {
+            //没有codec，把x_in当做32位float数组
+            const float* x = reinterpret_cast<const float*>(x_in);
+        }
+        const uint8_t* x = x_in;
+        //RAII，保存采样后的指针
+        std::unique_ptr<uint8_t[]> del1;
+        //RAII, 保存采样后的向量权重
+        std::unique_ptr<float[]> del3;
+        //检查所有输入向量的数量是不是超过允许的聚类样本的数量
+        //max_points_per_centroid来着上面的cp，代表聚类后每个类最多允许有多少个样本，k为聚类中心的数量
+        if (nx > k * max_points_per_centroid) {
+            uint8_t* x_new;
+            float* weights_new;
+            //超过了就进行采样，使其参与聚类的样本的数量满足等于 k * max_points_per_centroid
+            nx = subsample_training_set(
+                    *this, nx, x, line_size, weights, &x_new, &weights_new);
+            del1.reset(x_new);
+            x = x_new;
+            del3.reset(weights_new);
+            weights = weights_new;
+        } // 样本过少，比k * min_points_per_centroid还小就报warning
+        ... 
+        //处理corner case
+        ...
+        // 记录最佳迭代的容器
+        std::vector<ClusteringIterationStats> best_iteration_stats;
+        std::vector<float> best_centroids;//大小k * d
+        for (int redo = 0; redo < nredo; redo++) {
+            // 随机采样作为处理的聚类中心，这里也没使用类似kmeans++等技巧
+            rand_perm(perm.data(), nx, seed + 1 + redo * 15486557L);
+            if (!codec) {
+                //不使用codec，默认以32位float类型处理
+                for (int i = n_input_centroids; i < k; i++) {
+                    memcpy(&centroids[i * d], x + perm[i] * line_size,  line_size);
+                }
+            } else {
+                //使用codec自带的编码器
+                for (int i = n_input_centroids; i < k; i++) {
+                    codec->sa_decode(1, x + perm[i] * line_size, &centroids[i *     d]);
+                }
+            }
+            //可选的处理cp.spherical控制是否需要对聚类中心做L2归一化操作
+            //cp.int_centroids控制是否要将聚类中心取整
+            post_process_centroids();
+
+            //处理index，如果index没有train过，使用当前的聚类中心train一次，再把聚类    中心加入到index中
+            //为什么要先train一次？提高下面使用index检索的速度
+            ...
+
+            //开始kmeans迭代
+            for (int i = 0; i < niter; i++) {
+                if (!codec) {
+                    //不使用codec，直接去检索，获得到聚类中心的距离dis和聚类中的id保    存在assign中
+                    index.search(nx, reinterpret_cast<const float*>(x), 1,
+                            dis.get(),assign.get());
+                } else {
+                    //每次处理decode_block_size的vector
+                    for() {
+                        //先解码
+                        codec->sa_decode(
+                            i1 - i0, x + code_size * i0, decode_buffer.data());
+                        //再搜索距离哪个聚类中心最近
+                        index.search(i1 - i0,decode_buffer.data(),1,
+                                dis.get() + i0,assign.get() + i0)
+                    }
+                }
+
+            //计算所有的距离
+            obj = 0;
+            for (int j = 0; j < nx; j++) {
+                obj += dis[j];
+            }
+
+            //更新聚类中心，使用OpenMP优化
+            compute_centroids(d,k,nx,k_frozen,x,codec,assign.get(),weights,
+            hassign.data(),centroids.data());
+
+            //如果出现空的聚类，则找一个包含权重高的聚类中心，略微调整其聚类中心大小，从而把这个类分成两个类
+            int nsplit = split_clusters(
+            d, k, nx, k_frozen, hassign.data(), centroids.data());
+
+            //记录统计信息到iteration_stats中
+            ...
+
+            //后处理，上文介绍过，不赘述
+            post_process_centroids();
+            // 将新的聚类中心设置到index中
+            index.reset();
+            if (update_index) {
+                index.train(k, centroids.data());
+            }
+
+            index.add(k, centroids.data());
+            }
+            //所有的k-means迭代结束了，比较这次的结果是否比当前的最好的结果要好
+            //如果是的话，更新最优的结果
+            ...
+        }
+        //所有的redo做完了，取最优的解
+        centroids = best_centroids;
+        iteration_stats = best_iteration_stats;
+        index.reset();
+        index.add(k, best_centroids.data());
+        //现在index中保存了最优的k个聚类中心了
+    }
+```
+
+真长啊！现在我们知道了clus.train()就是把输入的向量做聚类然后把聚类中心放到train()函数传入的index里，其实quantizer_trains_alone的取值就是决定了在训练时要不要把quantizer传入Clustering中，如果不传入的话就使用外部的clustering_index，如果clustering_index为空指针的话，就新建一个IndexFlatL2来代替clustering_index，在聚类结束后，把聚类中心的点放入quantizer中。
+
+在Level1Quantizer中还有几个辅助方法，都是为listno(倒排表的编号)进行压缩:
+```c++
+//listno在压缩后占多少个字节
+size_t Level1Quantizer::coarse_code_size() const;
+//压缩list_no到code中
+void Level1Quantizer::encode_listno(idx_t list_no, uint8_t* code) const;
+// 从code中还原处理list_no
+idx_t Level1Quantizer::decode_listno(const uint8_t* code) const;
+```
+
+#### 1.2.2 InvertedLists接口及其实现
+InvertedLists规定了倒排表的接口，其实现类要支持多线程读、写，对于更改InvertedLists中的倒排拉链大小、添加新的倒排拉链，只需要保证在处理不同的倒排拉链时线程安全即可
+```c++
+struct InvertedLists {
+    //有多少个倒排拉链
+    size_t nlist;     ///< number of possible key values
+    //每个向量占用多少个字节的大小
+    size_t code_size; ///< code size per vector in bytes
+}
+```
+读取方法
+``` c++
+struct InvertedLists {
+    // 检查list_no对应的倒排拉链是否为空
+    bool is_empty(size_t list_no) const;
+
+    // list_no对应的倒排拉链中有多少个向量
+    virtual size_t list_size(size_t list_no) const = 0;
+    // 获得list_no对应的uint8数组，该数组是对向量集合的编码
+    virtual const uint8_t* get_codes(size_t list_no) const = 0;
+    // 获得list_no对应的id数组(也就是前文提到的labels)
+    virtual const idx_t* get_ids(size_t list_no) const = 0;
+    // 释放codes资源，delete codes
+    virtual void release_codes(size_t list_no, const uint8_t* codes) const;
+    // 释放ids资源，delete ids
+    virtual void release_ids(size_t list_no, const idx_t* ids) const;
+    // 获得list_no对应的倒排拉链，从倒排拉链中获得offset位置上的id
+    virtual idx_t get_single_id(size_t list_no, size_t offset) const;
+    // 获得list_no对应的倒排拉链，从倒排拉链中获得offset位置上的向量
+    virtual const uint8_t* get_single_code(size_t list_no, size_t offset) const;
+    // 预取制定list_no的倒排表,eg.在OnDiskInvertedList中，会通过在该方法中启动多个线程从磁盘上预取倒排表
+    void InvertedLists::prefetch_lists(const idx_t*, int) const;
+}
+```
+写入方法
+```c++
+    // 在list_no对应的倒排拉链中，添加物料对应的向量与id
+    // 多提一句，感觉这里应该是把物料对应的<id,vector>称为一个entry，下面我也用entry来代替<id,vector>
+    virtual size_t add_entry(size_t list_no, idx_t theid, 
+const uint8_t* code);
+    // 添加多个entry
+    virtual size_t add_entries(size_t list_no,size_t n_entry,
+    const idx_t* ids,const uint8_t* code) = 0;
+    // 在list_no对应的倒排拉链，将offset位置上的id、vector替换为新的id、code
+    virtual void update_entry(size_t list_no,size_t offset,
+    idx_t id,const uint8_t* code);
+    // 在list_no对应的倒排拉链上，将offset位置后n_entry长度上的entries用<ids,code>替代
+    virtual void update_entries(size_t list_no,size_t offset,size_t n_entry,
+            const idx_t* ids,const uint8_t* code);
+    // 更改list_no对应的倒排拉链的长度
+    virtual void resize(size_t list_no, size_t new_size) = 0;
+    //清空整个倒排表
+    virtual void reset();
+```
+
+一些高层的接口
+```c++
+
+```
+ 
