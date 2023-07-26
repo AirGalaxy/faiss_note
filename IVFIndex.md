@@ -1,11 +1,10 @@
 # Fassi源码阅读
-## 1.采用IVF方法的Index
-### 1.1 IVF方法简述
+## 1. IVF方法简述
 为了提高检索速度，我们可以牺牲一些准确度，只检索部分向量。我们希望选取离query向量近的一些向量。于是一个简单的想法是先对所有物料向量做聚类，得到N个聚类中心，在搜索时，先计算query向量与聚类中心的距离，找到最近的nlist个聚类中心，只与这nlist个聚类中心所代表的向量计算距离，找到其中最近的k个。这就是基于倒排表的向量检索方法。  
 这里的倒排表只是借用了传统的全文检索的搜索引擎中的词，可以把聚类中心理解为lucene中的倒排拉链的term，把属于该聚类中心的向量理解为倒排拉链中的doc
 
-### 1.2 辅助类介绍
-#### 1.2.1 Level1Quantizer类
+## 2. 辅助类介绍
+### 2.1 Level1Quantizer类
 先考察Level1Quantizer类的成员变量
 ```c++
 struct Level1Quantizer {
@@ -217,7 +216,7 @@ void Level1Quantizer::encode_listno(idx_t list_no, uint8_t* code) const;
 idx_t Level1Quantizer::decode_listno(const uint8_t* code) const;
 ```
 
-#### 1.2.2 InvertedLists接口及其实现
+### 2.2 InvertedLists接口及其实现
 InvertedLists规定了倒排表的接口，其实现类要支持多线程读、写，对于更改InvertedLists中的倒排拉链大小、添加新的倒排拉链，只需要保证在处理不同的倒排拉链时线程安全即可
 ```c++
 struct InvertedLists {
@@ -257,7 +256,7 @@ struct InvertedLists {
     // 多提一句，感觉这里应该是把物料对应的<id,vector>称为一个entry，下面我也用entry来代替<id,vector>
     virtual size_t add_entry(size_t list_no, idx_t theid, 
 const uint8_t* code);
-    // 添加多个entry
+    // 添加多个entry，在ArrayInvertedLists的实现中是添加在末尾
     virtual size_t add_entries(size_t list_no,size_t n_entry,
     const idx_t* ids,const uint8_t* code) = 0;
     // 在list_no对应的倒排拉链，将offset位置上的id、vector替换为新的id、code
@@ -274,6 +273,98 @@ const uint8_t* code);
 
 一些高层的接口
 ```c++
-
+    //将另一个InvertedLists合并到当前lists中，add_id是在添加时oivf中的id数组全部加上add_id这个值
+    void merge_from(InvertedLists* oivf, size_t add_id);
+    //将当前的invertedlist中的元素拷贝到other中，具体拷贝那些id参考subset_type_t的注释，这里不赘述
+    size_t copy_subset_to(InvertedLists& other,subset_type_t subset_type,
+    idx_t a1,idx_t a2) const;
 ```
+
+一些统计接口
+```c++
+// 衡量倒排拉链长度平衡程度，=1为完全平衡，> 1 不平衡
+double InvertedLists::imbalance_factor();
+// 所有倒排拉链长度之和
+size_t compute_ntotal() const;
+```
+
+所有的接口介绍完了，大家应该也知道该怎么实限这些接口，我们以ArrayInvertedLists为例简单看下实现。  
+ArrayInvertedLists是用std::vector存储的在内存中使用的倒排表，这也是默认的实现。
+```c++
+struct ArrayInvertedLists : InvertedLists {
+    // 物料对应的向量放在codes里面，一共有nlist个std::vector<uint8_t>(倒排拉链的向量部分)
+    std::vector<std::vector<uint8_t>> codes; // binary codes, size nlist
+    // 物料对应的id放在ids里面，一共有nlist个std::vector<idx_t>(倒排拉链的id部分)
+    std::vector<std::vector<idx_t>> ids;     ///< Inverted lists for indexes
+}
+```
+重载的方法比较重要的点:
+```c++
+size_t ArrayInvertedLists::add_entries(
+    size_t list_no,size_t n_entry,
+    const idx_t* ids_in,const uint8_t* code) {
+    if (n_entry == 0)
+        return 0;
+    assert(list_no < nlist);
+    size_t o = ids[list_no].size();
+    //先扩容
+    ids[list_no].resize(o + n_entry);
+    //将要添加的entry添加到vector的尾部
+    memcpy(&ids[list_no][o], ids_in, sizeof(ids_in[0]) * n_entry);
+    codes[list_no].resize((o + n_entry) * code_size);
+    memcpy(&codes[list_no][o * code_size], code, code_size * n_entry);
+    return o;
+}
+
+void ArrayInvertedLists::update_entries(
+        size_t list_no,
+        size_t offset,
+        size_t n_entry,
+        const idx_t* ids_in,
+        const uint8_t* codes_in) {
+    assert(list_no < nlist);
+    //update时，update的内容不能超过原始vector的大小，即update_entries不能自动扩容
+    assert(n_entry + offset <= ids[list_no].size());
+    memcpy(&ids[list_no][offset], ids_in, sizeof(ids_in[0]) * n_entry);
+    memcpy(&codes[list_no][offset * code_size], codes_in, code_size * n_entry);
+}
+```
+add_entries、update_entries的实现很简单，我们只需要注意add_entries是将新的entries加入到尾部，而update_entries是不能自动扩容的。  
+还有一些简单接口
+```c++
+size_t ArrayInvertedLists::list_size(size_t list_no) const {
+    assert(list_no < nlist);
+    // 直接取ids[list_no].size()作为每个的倒排拉链的长度
+    return ids[list_no].size();
+}
+
+const uint8_t* ArrayInvertedLists::get_codes(size_t list_no) const {
+    assert(list_no < nlist);
+    //返回codes这个vector的内部指针
+    return codes[list_no].data();
+}
+
+const idx_t* ArrayInvertedLists::get_ids(size_t list_no) const {
+    assert(list_no < nlist);
+    //返回ids这个vector的内部指针
+    return ids[list_no].data();
+}
+
+void ArrayInvertedLists::resize(size_t list_no, size_t new_size) {
+    //同时resize ids、codes
+    ids[list_no].resize(new_size);
+    codes[list_no].resize(new_size * code_size);
+}
+```
+这里的代码很简单，不用我解释大家也能看懂。
+
+总结下ArrayInvertedLists的特点
+1. 不能调整倒排拉链的数量，倒排拉链的数量始终为构造函数的中传入的nlist
+2. 添加entries时，是直接添加到ids、codes这两个vector的尾部
+3. update_entries时不能扩容
+4. 仅在内存内使用，没有持久化到磁盘的功能
+
+辅助函数介绍完了，现在可以正式介绍IVFIndex了
+
+## 2. IndexIVF类
  
