@@ -246,7 +246,7 @@ struct InvertedLists {
     virtual idx_t get_single_id(size_t list_no, size_t offset) const;
     // 获得list_no对应的倒排拉链，从倒排拉链中获得offset位置上的向量
     virtual const uint8_t* get_single_code(size_t list_no, size_t offset) const;
-    // 预取制定list_no的倒排表,eg.在OnDiskInvertedList中，会通过在该方法中启动多个线程从磁盘上预取倒排表
+    // 预取指定list_no的倒排表,eg.在OnDiskInvertedList中，会通过在该方法中启动多个线程从磁盘上预取倒排表
     void InvertedLists::prefetch_lists(const idx_t*, int) const;
 }
 ```
@@ -361,8 +361,43 @@ void ArrayInvertedLists::resize(size_t list_no, size_t new_size) {
 总结下ArrayInvertedLists的特点
 1. 不能调整倒排拉链的数量，倒排拉链的数量始终为构造函数的中传入的nlist
 2. 添加entries时，是直接添加到ids、codes这两个vector的尾部
-3. update_entries时不能扩容
+3. update_entries时不能自动扩容
 4. 仅在内存内使用，没有持久化到磁盘的功能
+
+### 1.3 DirectMap
+对于给定的物料的唯一标识符id，我们可以通过DirectMap在O(1)的时间内找到该物料属于的list_no和在该list_no中的offset(偏移)。内部实现为数组实现:``std::vector<idx_t>``或hash表实现``std::unordered_map<idx_t, idx_t>``。  
+如果设置类型为NoMap则不存储任何id到entry的映射  
+注意hash表的value与vector中的value类型为idx_t，64位整型，高32位为list_no，低32位为id对应的元素在invertedLists中的偏移offset，fassi中把这个64位整形称为lo，并提供了lo_build、lo_listno、lo_offset来操作lo
+```c++
+    // 设置用数组还是hash表，并使用invlists初始化该DirecMap
+    void DirectMap::set_type(Type new_type, const InvertedLists* invlists, size_t ntotal);
+    
+    // 通过id拿到lo
+    idx_t get(idx_t id) const;
+
+    // 如果type为数组，则不能添加<id,lo>数组
+    void check_can_add(const idx_t* ids);
+
+    // 添加一个<id,lo>，z这个函数不是线程安全的
+    void add_single_id(idx_t id, idx_t list_no, size_t offset);
+    // 清空容器
+    void clear();
+
+```
+特别说一下删除方法:
+```c++
+size_t DirectMap::remove_ids(const IDSelector& sel, InvertedLists* invlists)；
+```
+这里需要传入IDSelector、invlists的指针，remove_ids会删除invlists中在id在sel中的元素，如果DirectMap的类型为HashTable，则在DirectMap中同步invlists中的修改，如果为NoMap则什么事也不做，如果type为array则抛出异常。  
+和更新方法:
+```c++
+void DirectMap::update_codes(
+        InvertedLists* invlists,int n,const idx_t* ids,
+        const idx_t* assign,const uint8_t* codes);
+```
+只有数组实现的DirectMap才支持update_codes方法，其实现是把数组最后一个entry移动到要更新的id对应的offset位置(先删除)，然后把要更新的id插入到InvertedLists对应倒排拉链的尾部，在以上过程中invlists与DirectMap会同步更新，保证DirectMap中id到lo的映射是正确的。
+
+由于DirectMap类的方法都不是线程安全的，所以我们需要一个辅助类
 
 辅助函数介绍完了，现在可以正式介绍IVFIndex了
 
