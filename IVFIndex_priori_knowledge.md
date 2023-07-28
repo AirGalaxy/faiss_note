@@ -468,6 +468,4 @@ DirectMapAdd总结:
 
 
 辅助函数介绍完了，现在可以正式介绍IVFIndex了
-
-## 2. IndexIVF类
  
