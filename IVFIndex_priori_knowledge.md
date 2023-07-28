@@ -364,7 +364,7 @@ void ArrayInvertedLists::resize(size_t list_no, size_t new_size) {
 3. update_entries时不能自动扩容
 4. 仅在内存内使用，没有持久化到磁盘的功能
 
-### 1.3 DirectMap
+### 2.3 DirectMap
 对于给定的物料的唯一标识符id，我们可以通过DirectMap在O(1)的时间内找到该物料属于的list_no和在该list_no中的offset(偏移)。内部实现为数组实现:``std::vector<idx_t>``或hash表实现``std::unordered_map<idx_t, idx_t>``。  
 如果设置类型为NoMap则不存储任何id到entry的映射  
 注意hash表的value与vector中的value类型为idx_t，64位整型，高32位为list_no，低32位为id对应的元素在invertedLists中的偏移offset，fassi中把这个64位整形称为lo，并提供了lo_build、lo_listno、lo_offset来操作lo
