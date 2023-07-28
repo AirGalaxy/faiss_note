@@ -378,18 +378,22 @@ void ArrayInvertedLists::resize(size_t list_no, size_t new_size) {
     // 如果type为数组，则不能添加<id,lo>数组
     void check_can_add(const idx_t* ids);
 
-    // 添加一个<id,lo>，z这个函数不是线程安全的
+    // 添加一个<id,lo>
+    // 对于array，直接调用std::vector::push_back()
+    // 对于HashTable，直接调用hashtable[id] = lo
     void add_single_id(idx_t id, idx_t list_no, size_t offset);
     // 清空容器
     void clear();
 
 ```
+显然add_single_id不是线程安全的
 特别说一下删除方法:
 ```c++
 size_t DirectMap::remove_ids(const IDSelector& sel, InvertedLists* invlists)；
 ```
 这里需要传入IDSelector、invlists的指针，remove_ids会删除invlists中在id在sel中的元素，如果DirectMap的类型为HashTable，则在DirectMap中同步invlists中的修改，如果为NoMap则什么事也不做，如果type为array则抛出异常。  
-和更新方法:
+
+更新方法:
 ```c++
 void DirectMap::update_codes(
         InvertedLists* invlists,int n,const idx_t* ids,
@@ -397,7 +401,71 @@ void DirectMap::update_codes(
 ```
 只有数组实现的DirectMap才支持update_codes方法，其实现是把数组最后一个entry移动到要更新的id对应的offset位置(先删除)，然后把要更新的id插入到InvertedLists对应倒排拉链的尾部，在以上过程中invlists与DirectMap会同步更新，保证DirectMap中id到lo的映射是正确的。
 
-由于DirectMap类的方法都不是线程安全的，所以我们需要一个辅助类
+由于DirectMap类的add_single_id方法不是线程安全的，所以我们需要一个辅助类DirectMapAdd，来实现对DirectMap的线程安全的操作。这个类有必要分析一下
+
+```c++
+struct DirectMapAdd {
+    // 实际要更新的DirectMap
+    DirectMap& direct_map;
+    // DirectType类型
+    DirectMap::Type type;
+    // 原始DirectMap的LO的个数
+    size_t ntotal;
+    // 在原始DirectMap上要扩展n个LO
+    size_t n;
+    /* 在Type = hashtable的情况下，由于可以添加不连续的id，所以要使用xid记录调用add时添加的i到要添加的真实id的映射 */
+    const idx_t* xids;
+
+    // 用于临时缓存添加到hashtable类型的DirectMap的lo
+    std::vector<idx_t> all_ofs;
+
+    // 在DirectMap为array类型时，i为物料的id
+    // 在DirectMap为Hashtable类型时，物料的id为xid[i]
+    void add(size_t i, idx_t list_no, size_t offset);
+}
+```
+构造函数
+```c++
+DirectMapAdd::DirectMapAdd(DirectMap& direct_map, size_t n, const idx_t* xids)
+        : direct_map(direct_map), type(direct_map.type), n(n), xids(xids) {
+    if (type == DirectMap::Array) {
+        FAISS_THROW_IF_NOT(xids == nullptr);
+        ntotal = direct_map.array.size();
+        direct_map.array.resize(ntotal + n, -1);
+    } else if (type == DirectMap::Hashtable) {
+        // can't parallel update hashtable so use temp array
+        all_ofs.resize(n, -1);
+    }
+}
+```
+构造函数中预分配了空间，并在ntotal中记录了当前DirectMap存了多少数据
+添加接口
+```c++
+void DirectMapAdd::add(size_t i, idx_t list_no, size_t ofs) {
+    if (type == DirectMap::Array) {
+        //如果类型为array，则会直接对array[ntotal + i]赋值
+        direct_map.array[ntotal + i] = lo_build(list_no, ofs);
+    } else if (type == DirectMap::Hashtable) {
+        // 否则记录到all_ofs数组中
+        all_ofs[i] = lo_build(list_no, ofs);
+    }
+}
+```
+
+在析构函数中，才把all_ofs数组这个缓存放到direct_map.hashtable中，注意取id时优先取xids中的数据
+```c++
+DirectMapAdd::~DirectMapAdd() {
+    if (type == DirectMap::Hashtable) {
+        for (int i = 0; i < n; i++) {
+            idx_t id = xids ? xids[i] : ntotal + i;
+            direct_map.hashtable[id] = all_ofs[i];
+        }
+    }
+}
+```
+DirectMapAdd总结:  
+该类是对DirectMap的包装，虽然注释中写了其提供了线程安全的方法，但实际上我们还是需要在代码中保证，不同的线程不能添加同一个id及其对应的lo信息。
+
 
 辅助函数介绍完了，现在可以正式介绍IVFIndex了
 
