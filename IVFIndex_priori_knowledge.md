@@ -5,6 +5,7 @@
 
 ## 2. 辅助类介绍
 ### 2.1 Level1Quantizer类
+level1指对物料向量只做一次量化。
 先考察Level1Quantizer类的成员变量
 ```c++
 struct Level1Quantizer {
