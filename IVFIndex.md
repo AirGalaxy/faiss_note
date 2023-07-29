@@ -245,10 +245,54 @@ void IndexIVF::search_preassigned(
         int pmode = this->parallel_mode & ~PARALLEL_MODE_NO_HEAP_INIT;
         //只需将parallel_mode(取值范围0，1，2，3)左移10位就可以设置do_heap_init为false
         bool do_heap_init = !(this->parallel_mode & PARALLEL_MODE_NO_HEAP_INIT);
-        //
+        
+        // 获得InvertedListScanner
+        InvertedListScanner* scanner =
+        get_InvertedListScanner(store_pairs, sel);
 
 
-    }
+        // step2. 初始化lambda，辅助接下来真正并行的操作
+        // 初始化存放结果的堆的lambda
+        auto init_result = [&](float* simi, idx_t* idxi) {
+            if (!do_heap_init)
+                return;
+            if (metric_type == METRIC_INNER_PRODUCT) {
+                heap_heapify<HeapForIP>(k, simi, idxi);
+            } else {
+                heap_heapify<HeapForL2>(k, simi, idxi);
+            }
+        };
+        // 添加结果到堆中的lambda
+        auto add_local_results = [&](const float* local_dis,
+                                 const idx_t* local_idx,
+                                 float* simi,
+                                 idx_t* idxi) {
+        if (metric_type == METRIC_INNER_PRODUCT) {
+            heap_addn<HeapForIP>(k, simi, idxi, local_dis, local_idx, k);
+        } else {
+            heap_addn<HeapForL2>(k, simi, idxi, local_dis, local_idx, k);
+        }
+
+        // 堆结果进行堆排序的lambda
+        auto reorder_result = [&](float* simi, idx_t* idxi) {
+            if (!do_heap_init)
+                return;
+            if (metric_type == METRIC_INNER_PRODUCT) {
+                heap_reorder<HeapForIP>(k, simi, idxi);
+            } else {
+                heap_reorder<HeapForL2>(k, simi, idxi);
+            }
+        };
+
+        // 下面这个lambda很重要，实现了扫描指定的倒排拉链
+        auto scan_one_list = [&](idx_t key,
+                                 float coarse_dis_i,
+                                 float* simi,
+                                 idx_t* idxi,
+                                 idx_t list_size_max) {
+    };
+
+}
 ```
 
 
