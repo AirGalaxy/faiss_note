@@ -468,5 +468,37 @@ DirectMapAdd总结:
 该类是对DirectMap的包装，虽然注释中写了其提供了线程安全的方法，但实际上我们还是需要在代码中保证，不同的线程不能添加同一个id及其对应的lo信息。
 
 
+### 2.4 InvertedListScanner
+这个类用于辅助遍历倒排表
+```c++
+struct InvertedListScanner {
+    // 当前的list_no
+    idx_t list_no = -1;    
+    // 记录最大还是最小
+    bool keep_max = false; 
+    // true:存储LO false:存储id
+    bool store_pairs;
+
+    /// 遍历时使用的IDSelector
+    const IDSelector* sel;
+
+    InvertedListScanner(
+            bool store_pairs = false,
+            const IDSelector* sel = nullptr)
+            : store_pairs(store_pairs), sel(sel) {}
+
+    /// 遍历时一个向量占多少字节
+    size_t code_size = 0;
+    // 设置query向量
+    virtual void set_query(const float* query_vector) = 0;
+
+    // 设置当前的遍历的倒排表为编号为list_no的倒排表
+    virtual void set_list(idx_t list_no, float coarse_dis) = 0;
+
+    // 计算当前query到code这个向量的距离
+    virtual float distance_to_code(const uint8_t* code) const = 0;
+}
+```
+
 辅助函数介绍完了，现在可以正式介绍IVFIndex了
  
