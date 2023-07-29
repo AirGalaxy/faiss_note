@@ -469,7 +469,7 @@ DirectMapAdd总结:
 
 
 ### 2.4 InvertedListScanner
-这个类用于辅助遍历倒排表
+这个类是一个抽象类，用于辅助遍历倒排表
 ```c++
 struct InvertedListScanner {
     // 当前的list_no
@@ -499,6 +499,100 @@ struct InvertedListScanner {
     virtual float distance_to_code(const uint8_t* code) const = 0;
 }
 ```
+重点介绍下InvertedListScanner的以下几个方法:  
+scan_codes方法字面意思是扫描物料向量，但实际上承担了计算向量距离、对物料向量进行堆排序的任务
+```c++
+    virtual size_t scan_codes(
+            size_t n,
+            const uint8_t* codes,
+            const idx_t* ids,
+            float* distances,
+            idx_t* labels,
+            size_t k) const {
+        size_t nup = 0;
+        if (!keep_max) {
+            //小顶堆
+            for (size_t j = 0; j < list_size; j++) {
+                // 计算query到物料向量的距离
+                float dis = distance_to_code(codes);
+                // 比堆顶元素小，要更新
+                if (dis < simi[0]) {
+                    // 根据store_pair在labels中放LO或者物料的id
+                    int64_t id = store_pairs ? lo_build(list_no, j) : ids[j];
+                    // 调整堆
+                    maxheap_replace_top(k, simi, idxi, dis, id);
+                    nup++;
+                }
+                codes += code_size;
+            }
+        } else {
+            //大顶堆的处理
+            ...
+        }
+        return nup;
+    }
+```
+输入参数:
+|||
+|:---:|:---:|
+n|物料向量的个数
+codes|物料向量数组，大小n*code_size
+ids|物料向量的id
+k|堆的大小，即保留
 
-辅助函数介绍完了，现在可以正式介绍IVFIndex了
+输出参数:
+|||
+|:---:|:---:|
+labels|
+distances|堆中label对应的物料向量到query向量的距离
+
+返回值:堆调整的次数
+
+iterate_codes方法与scan_codes完全一致，只是把输入参数包装在InvertedListsIterator中，这里不赘述
+```c++
+virtual size_t iterate_codes(
+        InvertedListsIterator* iterator,
+        float* distances,
+        idx_t* labels,
+        size_t k,
+        // 实际从iterator中读取了多少个向量
+        size_t& list_size) const;
+```
+
+与范围搜索相关的方法:
+scan_codes_range方法计算了物料向量到query向量的距离，按照store_pairs将LO或者id放入到RangeQueryResult中
+```c++
+void InvertedListScanner::scan_codes_range(
+        size_t list_size,
+        const uint8_t* codes,
+        const idx_t* ids,
+        float radius,
+        RangeQueryResult& res) const {
+    for (size_t j = 0; j < list_size; j++) {
+        float dis = distance_to_code(codes);
+        bool keep = !keep_max
+                ? dis < radius
+                : dis > radius; // TODO templatize to remove this test
+        if (keep) {
+            int64_t id = store_pairs ? lo_build(list_no, j) : ids[j];
+            res.add(dis, id);
+        }
+        codes += code_size;
+    }
+}
+```
+由于距离小于radius的向量的个数是不确定的，所以干脆让外部提供RangeQueryResult接口，作为接受容器  
+实现很简单，这里不解释了，做不做排序什么的看RangeQueryResult调用方的实现
+```c++
+void InvertedListScanner::iterate_codes_range(
+        InvertedListsIterator* it,
+        float radius,
+        RangeQueryResult& res,
+        size_t& list_size) const;
+```
+范围扫描的方法iterate_codes_range，和scan_codes_range完全一致。
+
+
+## 3. 总结
+辅助类介绍完了，现在可以正式介绍IVFIndex了，不过在介绍了这么多辅助类之后，实现一个自己的IndexIVF应该是很简单的事。
  

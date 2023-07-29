@@ -48,7 +48,7 @@ virtual void search_preassigned(
 
 ## 2. IndexIVF
 ### 2.1 简介
-IndexIVF类提供了IVF检索功能的实现，是Index、IndexIVFInterface的子类。先看下其成员变量
+IndexIVF类是一个抽象类，提供了基本IVF检索功能的实现，是Index、IndexIVFInterface的子类。先看下其成员变量
 ```c++
     // 倒排表
     InvertedLists* invlists = nullptr;
@@ -225,7 +225,7 @@ add_core的实现中，通过OpenMp的线程号将要处理的倒排拉链分散
 这段代码中也有一些奇怪的地方，如对list_no/(coarse_idx[i]) < 0的情况的处理，理论上来说，这种情况会发生在IVFIndex没有train，或者trian的时候没有添加任何物料向量，就直接调用add_core，但是真正添加到倒排表中的元素nadd确只打了个log，计算ntotal时却是加上了所有的元素(包括list_no/(coarse_idx[i]) < 0的元素)个数n，这里也求大佬解惑！
 
 ### 2.4 搜索
-首先分析最复杂的方法search_preassigned，这个函数的参数的含义上面已经有分析，这里我们只看下其实现
+首先分析最复杂的方法search_preassigned，这个函数的用处与参数的含义在IndexIVFInterface已经有分析，这里我们只看下其实现
 ```c++
 void IndexIVF::search_preassigned(        
         idx_t n,
