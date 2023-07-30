@@ -495,7 +495,58 @@ void IndexIVF::search(
         float* distances,
         idx_t* labels,
         const SearchParameters* params_in) const {
+        // 计算合适的nprobe
         const size_t nprobe =
             std::min(nlist, params ? params->nprobe : this->nprobe);
+        // 定义sub_search_func这个lambda，这也是搜索的主要功能函数
+        auto sub_search_func = [this, k, nprobe, params](
+                                   idx_t n,
+                                   const float* x,
+                                   float* distances,
+                                   idx_t* labels,
+                                   IndexIVFStats* ivf_stats) {
+        // query要检索的倒排拉链编号
+        std::unique_ptr<idx_t[]> idx(new idx_t[n * nprobe]);
+        // query到这些聚类中心的距离
+        std::unique_ptr<float[]> coarse_dis(new float[n * nprobe]);
+        // 查找离query最近的nprobe个聚类中心的id(list_no)
+        quantizer->search(
+                n,
+                x,
+                nprobe,
+                coarse_dis.get(),
+                idx.get(),
+                params ? params->quantizer_params : nullptr);
+        // 预取倒排表
+        invlists->prefetch_lists(idx.get(), n * nprobe);
+        // 如前文所述，根据上面quantizer->search()找到的聚类中心id去进行搜索
+        search_preassigned(
+                n,
+                x,
+                k,
+                idx.get(),
+                coarse_dis.get(),
+                distances,
+                labels,
+                false,
+                params,
+                ivf_stats);
+    };
+    // 如果按照query的粒度并行的话
+    if ((parallel_mode & ~PARALLEL_MODE_NO_HEAP_INIT) == 0) {
+        int nt = std::min(omp_get_max_threads(), int(n));
+        //按照openMP支持的最大线程数划分请求，分片进行搜索
+        for (idx_t slice = 0; slice < nt; slice++) {
+           sub_search_func(
+                            i1 - i0,
+                            x + i0 * d,
+                            distances + i0 * k,
+                            labels + i0 * k,
+                            &stats[slice]);
         }
+    } else {
+        sub_search_func(n, x, distances, labels, &indexIVF_stats);
+    }
+}
 ```
+如果你还记得本节第一部分最后的内容，那你就会发现search的逻辑和上面说的完全一致
