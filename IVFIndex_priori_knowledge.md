@@ -279,7 +279,31 @@ const uint8_t* code);
 一些高层的接口
 ```c++
     //将另一个InvertedLists合并到当前lists中，add_id是在添加时oivf中的id数组全部加上add_id这个值
-    void merge_from(InvertedLists* oivf, size_t add_id);
+    void merge_from(InvertedLists* oivf, size_t add_id) {
+ #pragma omp parallel for
+ //  按倒排拉链并行
+    for (idx_t i = 0; i < nlist; i++) {
+        size_t list_size = oivf->list_size(i);
+        ScopedIds ids(oivf, i);
+        if (add_id == 0) {
+            //添加倒排表oivf中id为i的倒排拉链添加到到当前倒排表中
+            //ArrayInvertedLists的实现是添加到当前list_no=i的倒排拉链尾部
+            add_entries(i, list_size, ids.get(), ScopedCodes(oivf, i).get());
+        } else {
+            std::vector<idx_t> new_ids(list_size);
+            //先把每个id加上add_id
+            for (size_t j = 0; j < list_size; j++) {
+                new_ids[j] = ids[j] + add_id;
+            }
+            // 再添加到倒排拉链中
+            add_entries(
+                    i, list_size, new_ids.data(), ScopedCodes(oivf, i).get());
+        }
+        //释放oivf倒排表的资源
+        oivf->resize(i, 0);
+    }
+}
+    }
     //将当前的invertedlist中的元素拷贝到other中，具体拷贝那些id参考subset_type_t的注释，这里不赘述
     size_t copy_subset_to(InvertedLists& other,subset_type_t subset_type,
     idx_t a1,idx_t a2) const;

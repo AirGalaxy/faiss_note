@@ -580,4 +580,114 @@ void IndexIVF::range_search(
                     &indexIVF_stats);
         }
 ```
-range_search并没有分批搜索，实现是很朴素的
+range_search并没有分批搜索，实现是很朴素的。
+
+
+## 2.5 辅助函数
+```c++
+void IndexIVF::add_sa_codes(idx_t n, const uint8_t* codes, const idx_t* xids) {
+    size_t coarse_size = coarse_code_size();
+    DirectMapAdd dm_adder(direct_map, n, xids);
+
+    for (idx_t i = 0; i < n; i++) {
+        //被编码后的物料向量包括物料向量本身和聚类中心的编码值
+        const uint8_t* code = codes + (code_size + coarse_size) * i;
+        idx_t list_no = decode_listno(code);
+        idx_t id = xids ? xids[i] : ntotal + i;
+        size_t ofs = invlists->add_entry(list_no, id, code + coarse_size);
+        dm_adder.add(i, list_no, ofs);
+    }
+    ntotal += n;
+}
+```
+这个函数提供了添加物料向量的接口，可以看到IndexIVF默认被编码的向量是将物料向量和物料向量的聚类中心编码在一起的。
+
+```c++
+size_t IndexIVF::remove_ids(const IDSelector& sel) {
+    //同时从倒排表和direct_map中删除在sel中的物料向量id
+    size_t nremove = direct_map.remove_ids(sel, invlists);
+    ntotal -= nremove;
+    return nremove;
+}
+```
+删除接口，通过DirectMap的remove_ids接口实现对倒排表和DirectMap的同步删除
+
+```c++
+void IndexIVF::update_vectors(int n, const idx_t* new_ids, const float* x) {
+    // 如果DirectMap是hashtable，则先删除再添加
+    if (direct_map.type == DirectMap::Hashtable) {
+        IDSelectorArray sel(n, new_ids);
+        size_t nremove = remove_ids(sel);
+        add_with_ids(n, x, new_ids);
+        return;
+    }
+
+    std::vector<idx_t> assign(n);
+    //先找到物料对应的聚类中心
+    quantizer->assign(n, x, assign.data());
+
+    std::vector<uint8_t> flat_codes(n * code_size);
+    //先编码
+    encode_vectors(n, x, assign.data(), flat_codes.data());
+    //直接更新倒排表和directmap
+    direct_map.update_codes(
+            invlists, n, new_ids, assign.data(), flat_codes.data());
+}
+```
+update_vectors实现了对物料向量的更新，对于DirectMap类型的不同处理也不同
+
+编码接口:
+```c++
+size_t IndexIVF::sa_code_size() const {
+    size_t coarse_size = coarse_code_size();
+    //IndexIVF中，被编码的物料向量长度为物料向量本身的长度+粗聚类中心的长度
+    return code_size + coarse_size;
+}
+
+void IndexIVF::sa_encode(idx_t n, const float* x, uint8_t* bytes) const {
+    std::unique_ptr<int64_t[]> idx(new int64_t[n]);
+    // 先找到粗剧烈中心
+    quantizer->assign(n, x, idx.get());
+    // 然后才能编码
+    encode_vectors(n, x, idx.get(), bytes, true);
+}
+```
+
+重建向量的接口:
+```c++
+void IndexIVF::search_and_reconstruct(
+        idx_t n,
+        const float* x,
+        idx_t k,
+        float* distances,
+        idx_t* labels,
+        float* recons,
+        const SearchParameters* params_in) const;
+```
+先搜索，然后重建搜索到的向量，其搜索部分和不使用并行化的搜索流程一致，最终调用``reconstruct_from_offset``实现重建，该接口IndexIVF并未实现，再IVFPQ和IndexIVFFlat中会介绍
+
+```c++
+void IndexIVF::copy_subset_to(
+        IndexIVF& other,
+        InvertedLists::subset_type_t subset_type,
+        idx_t a1,
+        idx_t a2) const {
+            other.ntotal +=
+            invlists->copy_subset_to(*other.invlists, subset_type, a1, a2);
+        }
+```
+委托给invlists实现，已经再预备知识中说过，不再介绍
+
+合并倒排表的接口:
+```c++
+void IndexIVF::merge_from(Index& otherIndex, idx_t add_id) {
+    check_compatible_for_merge(otherIndex);
+    IndexIVF* other = static_cast<IndexIVF*>(&otherIndex);
+    invlists->merge_from(other->invlists, add_id);
+
+    ntotal += other->ntotal;
+    other->ntotal = 0;
+}
+```
+委托给invlists实现，合并两个倒排表
+
