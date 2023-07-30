@@ -225,6 +225,8 @@ struct InvertedLists {
     size_t nlist;     ///< number of possible key values
     //每个向量占用多少个字节的大小
     size_t code_size; ///< code size per vector in bytes
+    // 遍历当前的倒排表能使用迭代器吗
+    bool use_iterator;
 }
 ```
 读取方法
@@ -249,6 +251,8 @@ struct InvertedLists {
     virtual const uint8_t* get_single_code(size_t list_no, size_t offset) const;
     // 预取指定list_no的倒排表,eg.在OnDiskInvertedList中，会通过在该方法中启动多个线程从磁盘上预取倒排表
     void InvertedLists::prefetch_lists(const idx_t*, int) const;
+    // 获得list_no对应倒排拉链的迭代器
+    virtual InvertedListsIterator* get_iterator(size_t list_no) const;
 }
 ```
 写入方法
@@ -500,7 +504,7 @@ struct InvertedListScanner {
 }
 ```
 重点介绍下InvertedListScanner的以下几个方法:  
-scan_codes方法字面意思是扫描物料向量，但实际上承担了计算向量距离、对物料向量进行堆排序的任务
+scan_codes方法字面意思是扫描物料向量，但实际上承担了计算query向量到物料向量的距离，在distances、labels数组上对物料向量根据距离进行建堆的任务
 ```c++
     virtual size_t scan_codes(
             size_t n,
@@ -515,6 +519,7 @@ scan_codes方法字面意思是扫描物料向量，但实际上承担了计算�
             for (size_t j = 0; j < list_size; j++) {
                 // 计算query到物料向量的距离
                 float dis = distance_to_code(codes);
+                // heapify操作
                 // 比堆顶元素小，要更新
                 if (dis < simi[0]) {
                     // 根据store_pair在labels中放LO或者物料的id

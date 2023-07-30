@@ -245,13 +245,14 @@ void IndexIVF::search_preassigned(
         int pmode = this->parallel_mode & ~PARALLEL_MODE_NO_HEAP_INIT;
         //只需将parallel_mode(取值范围0，1，2，3)左移10位就可以设置do_heap_init为false
         bool do_heap_init = !(this->parallel_mode & PARALLEL_MODE_NO_HEAP_INIT);
-        
-        // 获得InvertedListScanner
+#pragma omp parallel if (do_parallel) reduction(+ : nlistv, ndis, nheap) {
+        // 每个并行线程获得一个InvertedListScanner
         InvertedListScanner* scanner =
         get_InvertedListScanner(store_pairs, sel);
 
 
         // step2. 初始化lambda，辅助接下来真正并行的操作
+        // 这几个lambda中 simi为存放检索到的物料向量到query向量的距离， idxi为物料向量的id或LO
         // 初始化存放结果的堆的lambda
         auto init_result = [&](float* simi, idx_t* idxi) {
             if (!do_heap_init)
@@ -267,10 +268,11 @@ void IndexIVF::search_preassigned(
                                  const idx_t* local_idx,
                                  float* simi,
                                  idx_t* idxi) {
-        if (metric_type == METRIC_INNER_PRODUCT) {
-            heap_addn<HeapForIP>(k, simi, idxi, local_dis, local_idx, k);
-        } else {
-            heap_addn<HeapForL2>(k, simi, idxi, local_dis, local_idx, k);
+            if (metric_type == METRIC_INNER_PRODUCT) {
+                heap_addn<HeapForIP>(k, simi, idxi, local_dis, local_idx, k);
+            } else {
+                heap_addn<HeapForL2>(k, simi, idxi, local_dis, local_idx, k);
+            }
         }
 
         // 堆结果进行堆排序的lambda
@@ -284,17 +286,204 @@ void IndexIVF::search_preassigned(
             }
         };
 
-        // 下面这个lambda很重要，实现了扫描指定的倒排拉链
-        auto scan_one_list = [&](idx_t key,
+        // 下面这个lambda很重要，实现了扫描指定list_no的倒排拉链
+        auto scan_one_list = [&](idx_t key, //指定倒排拉链的编号
                                  float coarse_dis_i,
-                                 float* simi,
-                                 idx_t* idxi,
-                                 idx_t list_size_max) {
-    };
+                                 float* simi, //当前倒排拉链中的元素到query向量的距离
+                                 idx_t* idxi, // 当前倒排拉链中
+                                 idx_t list_size_max) {//每个倒排拉链最多检索的物料个数
+            // 设置当前遍历的倒排拉链的编号
+            scanner->set_list(key, coarse_dis_i);
+            // 将扫描的倒排拉链的数量加1
+            nlistv++;
+            try {
+                if (invlists->use_iterator) {
+                    size_t list_size = 0;
+                    std::unique_ptr<InvertedListsIterator> it(
+                            invlists->get_iterator(key));
+                    // 使用迭代器遍历倒排拉链，并在simi, idxi上根据物料向量到query向量的距离进行heapify
+                    nheap += scanner->iterate_codes(
+                            it.get(), simi, idxi, k, list_size);
+                } else {
+                    //根据list_no获得倒排拉链的物料向量
+                    InvertedLists::ScopedCodes scodes(invlists, key);
+                    const uint8_t* codes = scodes.get();
+                    // 如上所述，如果搜索结果中需要的是id，则从倒排拉链中取出物料id
+                    if (!store_pairs) {
+                        sids.reset(new InvertedLists::ScopedIds(invlists, key));
+                        ids = sids->get();
+                    }
+                    // 如果是IDSelectorRange，则只检索IDSelectorRange范围内的物料向量
+                    if (selr) {
+                        size_t jmin, jmax;
+                        selr->find_sorted_ids_bounds(
+                                list_size, ids, &jmin, &jmax);
+                        // 放入到scanner堆中的元素个数，也就是scanner遍历的物料向量的个数
+                        list_size = jmax - jmin;
+                        if (list_size == 0) {
+                            return (size_t)0;
+                        }
+                        codes += jmin * code_size;
+                        ids += jmin;
+                    }
+                    // scan_codes遍历codes、ids，计算距离并保存最近的k个到simi、idxi这两个堆中，返回值为堆调整的次数
+                    nheap += scanner->scan_codes(
+                            list_size, codes, ids, simi, idxi, k);
+                    //返回scanner遍历的物料向量的个数
+                    return list_size;
+                }
+            }
+
+        };
+
+        //step.3 所有的lambda已经准备好，进行真正的并行操作
+        // 根据pmode做不同的并行策略，这部分逻辑我们拆出来说
+        ...
+    }
+    //并行段结束, 更新状态
+    if (ivf_stats) {
+        ivf_stats->nq += n;
+        ivf_stats->nlist += nlistv;
+        ivf_stats->ndis += ndis;
+        ivf_stats->nheap_updates += nheap;
+    }
 
 }
 ```
+pmode=0或3的情况，进行query粒度的并行:
+```c++
+#pragma omp parallel if (do_parallel) reduction(+ : nlistv, ndis, nheap) {
+        // 每个并行线程获得一个InvertedListScanner
+        InvertedListScanner* scanner =
+        get_InvertedListScanner(store_pairs, sel);
 
+        if (pmode == 0 || pmode == 3) {
+#pragma omp for
+        // query粒度的并行
+        for (idx_t i = 0; i < n; i++) {
+            scanner->set_query(x + i * d);
+            // 每次循环，指向存放结果的指针向前走一个query结果的大小(k)
+            float* simi = distances + i * k;
+            idx_t* idxi = labels + i * k;
+            init_result(simi, idxi);
+            idx_t nscan = 0;
+
+            // 遍历倒排拉链时不并行(pmode=0 || pmode=3)
+            for (size_t ik = 0; ik < nprobe; ik++) {
+                // 遍历倒排拉链，将当前拉链中比结果堆中距离小的元素插入结果堆
+                nscan += scan_one_list(
+                        keys[i * nprobe + ik],
+                        coarse_dis[i * nprobe + ik],
+                        simi,
+                        idxi,
+                        max_codes - nscan);
+                // 扫描的物料向量个数超过 max_codes，停止扫描
+                if (nscan >= max_codes) {
+                    break;
+                }
+            }
+
+            ndis += nscan;
+            // 对当前query对应的搜索结果的堆进行堆排序，这里是原地进行排序，需要o(1)的额外空间
+            reorder_result(simi, idxi);
+        }
+    }
+```
+
+pmode=1，对倒排表进行并行的处理:
+```c++
+if (pmode == 1) {
+            std::vector<idx_t> local_idx(k);
+            std::vector<float> local_dis(k);
+
+            for (size_t i = 0; i < n; i++) {
+                // 每个线程只有一个scanner
+                scanner->set_query(x + i * d);
+                init_result(local_dis.data(), local_idx.data());
+                
+#pragma omp for schedule(dynamic)
+                // 并行的for是以nprobe，也就是倒排表的粒度来并行的
+                for (idx_t ik = 0; ik < nprobe; ik++) {
+                    ndis += scan_one_list(
+                            keys[i * nprobe + ik],
+                            coarse_dis[i * nprobe + ik],
+                            //结果放到了thread_local的dis与idx数组中
+                            local_dis.data(),
+                            local_idx.data(),
+                            unlimited_list_size);
+                }
+                float* simi = distances + i * k;
+                idx_t* idxi = labels + i * k;
+#pragma omp single
+                // 初始化最终结果的当前query对应的哪个堆。单线程执行
+                init_result(simi, idxi);
+// 每个线程都将等待，直到其他所有线程都达到此点。
+#pragma omp barrier
+// 每个线程按照单线程的顺序挨个把thread_local结果放到最终结果数组中
+#pragma omp critical
+                {
+                    add_local_results(
+                            local_dis.data(), local_idx.data(), simi, idxi);
+                }
+#pragma omp barrier
+
+// 只在一个线程中对当前query进行原址堆排序
+#pragma omp single
+                reorder_result(simi, idxi);
+            }
+        } 
+```
+当pmode = 2时，会进行query粒度及倒排拉链的粒度的并行处理:
+```c++
+if (pmode == 2) {
+            std::vector<idx_t> local_idx(k);
+            std::vector<float> local_dis(k);
+
+#pragma omp single
+            //在单线程上初始化最终结果数组
+            for (int64_t i = 0; i < n; i++) {
+                init_result(distances + i * k, labels + i * k);
+            }
+
+#pragma omp for schedule(dynamic)
+// 同时对倒排拉链与query进行并行的处理
+            for (int64_t ij = 0; ij < n * nprobe; ij++) {
+                //第几个倒排拉链
+                size_t i = ij / nprobe;
+                //第几个query向量
+                size_t j = ij % nprobe;
+                //设置scanner的query
+                scanner->set_query(x + i * d);
+                //初始化thread_local的结果
+                init_result(local_dis.data(), local_idx.data());
+                //计算距离并建堆
+                ndis += scan_one_list(
+                        keys[ij],
+                        coarse_dis[ij],
+                        local_dis.data(),
+                        local_idx.data(),
+                        unlimited_list_size);
+//各线程按顺序把thread_local的结果放到最终结果distances、labels中
+#pragma omp critical
+                {
+                    add_local_results(
+                            local_dis.data(),
+                            local_idx.data(),
+                            distances + i * k,
+                            labels + i * k);
+                }
+            }
+//在单线程上对query结果进行原址排序
+#pragma omp single
+            for (int64_t i = 0; i < n; i++) {
+                reorder_result(distances + i * k, labels + i * k);
+            }
+        } 
+```
+由于这里我们没有设置openMP的线程数，所以最大的并行的线程数还是会受到CPU核心数的限制。  
+可以看到，这里的search_preassigned实现了对指定倒排拉链的搜索，同时使用openMP进行可控制粒度的并行操作，当然根据fassi源码的注释中所写，最多的还是pmode=0，即query粒度的并行。
+
+此外，还有range_search_preassigned方法，提供了范围检索的功能，其代码结构完全一致，只是在scan_codes时调用了scan_codes_range或iterate_codes_range方法，这里就不分析了，感兴趣的读者可以自己研究。
 
 
 重载了Index类的方法:
