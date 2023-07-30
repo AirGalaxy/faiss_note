@@ -550,3 +550,34 @@ void IndexIVF::search(
 }
 ```
 如果你还记得本节第一部分最后的内容，那你就会发现search的逻辑和上面说的完全一致
+
+最后简单介绍下range_search函数，这个函数我相信就算我不说大家也很清楚了，套路都是一样的:
+```c++
+void IndexIVF::range_search(
+        idx_t nx,
+        const float* x,
+        float radius,
+        RangeSearchResult* result,
+        const SearchParameters* params_in) const {
+            //step1.确定nprobe
+            const size_t nprobe = std::min(nlist, params ? params->nprobe : this->nprobe);
+            std::unique_ptr<idx_t[]> keys(new idx_t[nx * nprobe]);
+            std::unique_ptr<float[]> coarse_dis(new float[nx * nprobe]);
+            //step2.寻找聚类中心id
+            quantizer->search(
+                nx, x, nprobe, coarse_dis.get(), keys.get(), quantizer_params);
+                    invlists->prefetch_lists(keys.get(), nx * nprobe);
+            //step3.调用range_search_preassigned完成搜索
+            range_search_preassigned(
+                    nx,
+                    x,
+                    radius,
+                    keys.get(),
+                    coarse_dis.get(),
+                    result,
+                    false,
+                    params,
+                    &indexIVF_stats);
+        }
+```
+range_search并没有分批搜索，实现是很朴素的
