@@ -467,8 +467,9 @@ DirectMapAdd::DirectMapAdd(DirectMap& direct_map, size_t n, const idx_t* xids)
     }
 }
 ```
-构造函数中预分配了空间，并在ntotal中记录了当前DirectMap存了多少数据
-添加接口
+构造函数中预分配了空间，并在ntotal中记录了当前DirectMap存了多少数据  
+
+添加LO的方法
 ```c++
 void DirectMapAdd::add(size_t i, idx_t list_no, size_t ofs) {
     if (type == DirectMap::Array) {
@@ -480,8 +481,7 @@ void DirectMapAdd::add(size_t i, idx_t list_no, size_t ofs) {
     }
 }
 ```
-
-在析构函数中，才把all_ofs数组这个缓存放到direct_map.hashtable中，注意取id时优先取xids中的数据
+该接口实现了将指定的id对应的LO添加到DirectMap中。需要注意的是，如果DirectMap类型为HashMap，在析构函数中，才把all_ofs数组这个缓存放到direct_map.hashtable中，注意取id时优先取xids中的数据，代码如下所示:
 ```c++
 DirectMapAdd::~DirectMapAdd() {
     if (type == DirectMap::Hashtable) {
@@ -492,6 +492,8 @@ DirectMapAdd::~DirectMapAdd() {
     }
 }
 ```
+
+
 DirectMapAdd总结:  
 该类是对DirectMap的包装，虽然注释中写了其提供了线程安全的方法，但实际上我们还是需要在代码中保证，不同的线程不能添加同一个id及其对应的lo信息。
 
