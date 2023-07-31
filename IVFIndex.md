@@ -1,4 +1,5 @@
 # Fassi源码阅读
+本节开始分析IVF方法的实现
 ## 1. IndexIVFInterface
 IndexIVFInterface是接口类，定义了使用IVF方法的index必须实现的方法。
 ```c++
@@ -693,4 +694,5 @@ void IndexIVF::merge_from(Index& otherIndex, idx_t add_id) {
 委托给invlists实现，合并两个倒排表
 
 ## 3. 总结
-IndexIVF作为一个抽象基类，实现了对IVF方法，并使用OpenMP在多线程上进行了优化，通过将不同的数据分配到不同的线程上，避免了竞争的出现。
+1. IndexIVF作为一个抽象基类，实现了对IVF方法，并使用OpenMP在多线程上进行了优化，通过将不同的数据分配到不同的线程上，避免了竞争的出现。
+2. IndexIVF将搜索与向量的存储、压缩实现分离开来，子类实现向量的压缩、存储即可实现IVF检索。
