@@ -117,7 +117,8 @@ directMap的type为NoMap且未分配空间
 IndexIVF的工作流程:
 1. 使用物料向量训练找到聚类中心
 2. 添加物料向量
-3. 搜索
+3. 搜索  
+
 接下来我会按找这三个步骤介绍IndexIVF是怎么实现的
 
 ### 2.2 训练
@@ -159,9 +160,9 @@ void IndexIVF::add_core(
         const idx_t* xids,
         const idx_t* coarse_idx); 
 ```
-n:添加n个物料向量
-x:物料向量
-xids:物料向量的id
+n:添加n个物料向量  
+x:物料向量  
+xids:物料向量的id  
 coarse_idx:物料向量所属的聚类中心id
 
 add_core的实现如下:
@@ -169,7 +170,7 @@ add_core的实现如下:
 void IndexIVF::add_core( idx_t n, const float* x, const idx_t* xids,
         const idx_t* coarse_idx) {
    idx_t bs = 65536;
-   //如果n的取值超过bs，则按照bs的大小分批处理
+   //如果样本数量n超过bs，则按照bs的大小分批处理
     if (n > bs) {
         for (idx_t i0 = 0; i0 < n; i0 += bs) {
             idx_t i1 = std::min(n, i0 + bs);
@@ -190,7 +191,7 @@ void IndexIVF::add_core( idx_t n, const float* x, const idx_t* xids,
     #pragma omp parallel reduction(+ : nadd)
     {   // 总线程数
         int nt = omp_get_num_threads();
-        // 当前线程编号 0，1，2，3...
+        // 当前线程编号 0，1，2，3...， 通过list_no % nt == rank实现不同的倒排拉链分配到不同线程上
         int rank = omp_get_thread_num();
         // nadd为实际添加到倒排表中的元素
         size_t nadd = 0, nminus1 = 0;
@@ -275,7 +276,7 @@ void IndexIVF::search_preassigned(
             }
         }
 
-        // 堆结果进行堆排序的lambda
+        // 对结果进行堆排序的lambda
         auto reorder_result = [&](float* simi, idx_t* idxi) {
             if (!do_heap_init)
                 return;
@@ -583,7 +584,7 @@ void IndexIVF::range_search(
 range_search并没有分批搜索，实现是很朴素的。
 
 
-## 2.5 辅助函数
+### 2.5 辅助函数
 ```c++
 void IndexIVF::add_sa_codes(idx_t n, const uint8_t* codes, const idx_t* xids) {
     size_t coarse_size = coarse_code_size();
@@ -676,7 +677,7 @@ void IndexIVF::copy_subset_to(
             invlists->copy_subset_to(*other.invlists, subset_type, a1, a2);
         }
 ```
-委托给invlists实现，已经再预备知识中说过，不再介绍
+委托给invlists实现，已经在预备知识中说过，不再介绍
 
 合并倒排表的接口:
 ```c++
@@ -691,3 +692,5 @@ void IndexIVF::merge_from(Index& otherIndex, idx_t add_id) {
 ```
 委托给invlists实现，合并两个倒排表
 
+## 3. 总结
+IndexIVF作为一个抽象基类，实现了对IVF方法，并使用OpenMP在多线程上进行了优化，通过将不同的数据分配到不同的线程上，避免了竞争的出现。

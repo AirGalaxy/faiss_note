@@ -207,7 +207,7 @@ void Clustering::train_encoded(
 
 真长啊！现在我们知道了clus.train()就是把输入的向量做聚类然后把聚类中心放到train()函数传入的index里，其实quantizer_trains_alone的取值就是决定了在训练时要不要把quantizer传入Clustering中，如果不传入的话就使用外部的clustering_index，如果clustering_index为空指针的话，就新建一个IndexFlatL2来代替clustering_index，在聚类结束后，把聚类中心的点放入quantizer中。
 
-在Level1Quantizer中还有几个辅助方法，都是为listno(倒排表的编号)进行压缩:
+在Level1Quantizer中还有几个辅助方法，都是为listno(倒排拉链的编号)进行压缩:
 ```c++
 //listno在压缩后占多少个字节
 size_t Level1Quantizer::coarse_code_size() const;
