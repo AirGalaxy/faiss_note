@@ -248,3 +248,4 @@ void ProductQuantizer::compute_code(const float* x, uint8_t* code) const {
     }
 }
 ```
+这里实现都是由模板函数compute_code实现的，同时对子向量量化后所占位数nbits = 8，nbits = 16的情况做了优化
