@@ -66,6 +66,7 @@ struct Quantizer {
 
 ## 3. ProductQuantizer
 仅为L2距离实现的乘积量化器
+## 3.1 成员变量
 ```c++
 struct ProductQuantizer : Quantizer {
     //子量化器的数量(子量化器可以理解为Level1Quantizer)
@@ -85,10 +86,165 @@ struct ProductQuantizer : Quantizer {
         Train_hot_start,     
         //不同的PQ分段共享词典
         Train_shared,        
-        
-        Train_hypercube,    
+        //使用超立方体采样初始化聚类中心
+        Train_hypercube,
+        //使用超立方体采样+pca初始化聚类中心    
         Train_hypercube_pca
     };
+    train_type_t train_type;
+    // 聚类策略
+    ClusteringParameters cp;
+    // 使用这个Index来寻找子聚类中心
+    Index* assign_index;
+    // 聚类中心表 布局是M * ksub *dsub
+    std::vector<float> centroids;
+    // 转置后的聚类中心表，布局是dsub * M * ksub
+    std::vector<float> transposed_centroids;
+    // 存储了子向量聚类中心的向量的L2范数的平方
+    std::vector<float> centroids_sq_lengths;
 }
 ```
+注意下centroids，要从centroids中取到指定的位置上的聚类中心向量。第m个codebook的第k个聚类中心的向量地址应该为[centroids + dsub * ksub * m + k * dsub, centroids + dsub * ksub * m + (k + 1) * dsub]，可以参考下面的读取聚类中心的方法:
+```c++
+    // 读取编号为m的codebook的第i个聚类中心向量
+    float* get_centroids(size_t m, size_t i) {
+        return &centroids[(m * ksub + i) * dsub];
+    }
+    const float* get_centroids(size_t m, size_t i) const {
+        return &centroids[(m * ksub + i) * dsub];
+    }
+```
+### 3.2 成员函数
+先看下构造函数:
+```c++
+ProductQuantizer::ProductQuantizer(
+    //原始输入向量的维数
+    size_t d, 
+    //要分割成多少个子向量
+    size_t M, 
+    //每个子向量的索引占多少个bit
+    //默认子向量的索引占的bit数所能代表的最大数量为子向量聚类中心的个数
+    size_t nbits)
+        //Quantizer中的code_size在set_derived_values中计算
+        : Quantizer(d, 0), M(M), nbits(nbits), assign_index(nullptr) {
+    set_derived_values();
+}
+void ProductQuantizer::set_derived_values() {
+    //每个子向量多少维
+    dsub = d / M;
+    //量化后的物料向量占多少字节
+    code_size = (nbits * M + 7) / 8;
+    //每个子量化器有多少个聚类中心
+    ksub = 1 << nbits;
+    //预分配空间，一共dsub * ksub * M = d * ksub个float
+    centroids.resize(d * ksub);
+    //默认训练方式
+    train_type = Train_default;
+}
+```
+构造函数中就是通过元素向量的维数、子向量聚类中心的个数，算出每个子向量多少维，量化编码后的物料向量占多少个字节，然后为保存子聚类中心的容器分配空间
 
+设置第m个codebook的向量
+```c++
+void ProductQuantizer::set_params(const float* centroids_, int m) {
+    memcpy(get_centroids(m, 0),
+           centroids_,
+           ksub * dsub * sizeof(centroids_[0]));
+}
+```
+#### 3.2.1 训练函数
+和Level1Quantizer类似，ProductQuantizer也是要先训练，才能做量化的，我们按这个顺序，先看下训练的过程。
+* 所有的分段都共享相同的聚类中心，即train_type == Train_shared的情况
+```c++
+void ProductQuantizer::train(size_t n, const float* x) {
+    if (train_type == Train_shared) {
+        Clustering clus(dsub, ksub, cp);
+        IndexFlatL2 index(dsub);
+        // 把所有的子向量全部送去进行kmeans聚类
+        clus.train(n * M, x, assign_index ? *assign_index : index);
+        for (int m = 0; m < M; m++) {
+            //M段子向量的聚类中心(codebook)都是一样的
+            set_params(clus.centroids.data(), m);
+        }
+    }
+}
+```
+这种情况比较简单，具体的情况已经在Level1Quantizer中分析过
+
+* train_type为其他值的情况
+```c++
+    final_train_type = train_type;
+    if (train_type == Train_hypercube ||
+        train_type == Train_hypercube_pca) {
+        if (dsub < nbits) {
+            final_train_type = Train_default;
+        }
+    }
+```
+如果每个子向量的维度比量化后的向量的所占的bit数还少，就不进行hypercube初始化。
+
+```c++
+    //放一列子向量的缓存空间
+    float* xslice = new float[n * dsub];
+    ScopeDeleter<float> del(xslice);
+
+    for (int m = 0; m < M; m++) {
+        //重整输入向量形状，取第m列所有子向量放到xslice中
+        for (int j = 0; j < n; j++)
+            memcpy(xslice + j * dsub,
+                   x + j * d + m * dsub,
+                   dsub * sizeof(float));
+        Clustering clus(dsub, ksub, cp);
+
+        // we have some initialization for the centroids
+        if (final_train_type != Train_default) {
+            //预分配空间，用来放入初始化的聚类中心
+            clus.centroids.resize(dsub * ksub);
+        }
+
+        switch (final_train_type) {
+            case Train_hypercube:
+                // 超立方体初始化聚类中心
+                init_hypercube(
+                        dsub, nbits, n, xslice, clus.centroids.data());
+                break;
+                // 超立方体+pca初始化聚类中心
+            case Train_hypercube_pca:
+                init_hypercube_pca(
+                        dsub, nbits, n, xslice, clus.centroids.data());
+                break;
+                // 热启动方式，初始聚类中心由外部传入
+            case Train_hot_start:
+                memcpy(clus.centroids.data(),
+                       get_centroids(m, 0),
+                       dsub * ksub * sizeof(float));
+                break;
+            default:;
+        }
+        //聚类，把聚类中心放到成员变量centroids中
+        IndexFlatL2 index(dsub);
+        clus.train(n, xslice, assign_index ? *assign_index : index);
+        set_params(clus.centroids.data(), m);
+    }
+```
+可以看到除了Train_shared的情况，其他的都基本一致，只是在初始化聚类中心的策略不同。
+
+#### 3.2.2 编码(量化)函数
+先看下对单个向量进行编码的函数:
+```c++
+void ProductQuantizer::compute_code(const float* x, uint8_t* code) const {
+    switch (nbits) {
+        case 8:
+            faiss::compute_code<PQEncoder8>(*this, x, code);
+            break;
+
+        case 16:
+            faiss::compute_code<PQEncoder16>(*this, x, code);
+            break;
+
+        default:
+            faiss::compute_code<PQEncoderGeneric>(*this, x, code);
+            break;
+    }
+}
+```
