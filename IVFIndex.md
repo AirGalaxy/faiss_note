@@ -648,7 +648,7 @@ size_t IndexIVF::sa_code_size() const {
 
 void IndexIVF::sa_encode(idx_t n, const float* x, uint8_t* bytes) const {
     std::unique_ptr<int64_t[]> idx(new int64_t[n]);
-    // 先找到粗剧烈中心
+    // 先找到粗聚类中心
     quantizer->assign(n, x, idx.get());
     // 然后才能编码
     encode_vectors(n, x, idx.get(), bytes, true);
