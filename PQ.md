@@ -248,4 +248,103 @@ void ProductQuantizer::compute_code(const float* x, uint8_t* code) const {
     }
 }
 ```
-这里实现都是由模板函数compute_code实现的，同时对子向量量化后所占位数nbits = 8，nbits = 16的情况做了优化
+这里实现都是由模板函数compute_code实现的，同时对子向量量化后所占位数nbits = 8，nbits = 16的情况做了优化。
+简单看下compute_code的方法:
+```c++
+template <class PQEncoder>
+void compute_code(const ProductQuantizer& pq, const float* x, uint8_t* code) {
+    // 预先分配了一个数组来记录所有子向量聚类中心到要量化的向量的距离
+    // 下面会解释为什么这么做
+    std::vector<float> distances(pq.ksub);
+    // 定义encoder
+    PQEncoder encoder(code, pq.nbits);
+    // 对于第m列子向量
+    for (size_t m = 0; m < pq.M; m++) {
+        //要编码向量的第m列子向量
+        const float* xsub = x + m * pq.dsub;
+
+        uint64_t idxm = 0;
+        if (pq.transposed_centroids.empty()) {
+            // 寻找最近的子向量聚类中心
+            idxm = fvec_L2sqr_ny_nearest(
+                    //存放距离的数组
+                    distances.data(),
+                    //要编码的子向量起始地址
+                    xsub,
+                    // codebook
+                    pq.get_centroids(m, 0),
+                    // 子向量维度
+                    pq.dsub,
+                    // 子向量个数
+                    pq.ksub);
+        } else {
+            // transposed centroids are available, use'em
+            idxm = fvec_L2sqr_ny_nearest_y_transposed(
+                    distances.data(),
+                    xsub,
+                    pq.transposed_centroids.data() + m * pq.ksub,
+                    pq.centroids_sq_lengths.data() + m * pq.ksub,
+                    pq.dsub,
+                    pq.M * pq.ksub,
+                    pq.ksub);
+        }
+
+        encoder.encode(idxm);
+    }
+}
+```
+代码的逻辑和我们上面说的PQ方法完全一致，找到最近的子向量聚类中心对应的id，然后对id进行编码。注意这里找最近的子向量并没有像Level1Quantizer一样，而是使用fvec_L2sqr_ny_nearest()去寻找。接下来我们就看下fvec_L2sqr_ny_nearest是怎么工作的。
+```c++
+void fvec_L2sqr_ny_ref(
+        float* dis,
+        const float* x,
+        const float* y,
+        size_t d,
+        size_t ny) {
+    //直接循环计算向量之间的距离
+    for (size_t i = 0; i < ny; i++) {
+        //fvec_L2sqr:计算两个维度为d的向量之间的距离
+        //我们在Level1Quantizer中分析过
+        dis[i] = fvec_L2sqr(x, y, d);
+        y += d;
+    }
+}
+
+size_t fvec_L2sqr_ny_nearest_ref(
+        float* distances_tmp_buffer,
+        const float* x,
+        const float* y,
+        size_t d,
+        size_t ny) {
+    //先计算子聚类中心到要编码的子向量的距离，放入distances_tmp_buffer数组中
+    fvec_L2sqr_ny(distances_tmp_buffer, x, y, d, ny);
+
+    size_t nearest_idx = 0;
+    float min_dis = HUGE_VALF;
+    //寻找最小距离的id
+    for (size_t i = 0; i < ny; i++) {
+        if (distances_tmp_buffer[i] < min_dis) {
+            min_dis = distances_tmp_buffer[i];
+            nearest_idx = i;
+        }
+    }
+    return nearest_idx;
+}
+```
+代码很简单，不用我解释大家也懂。  
+不过这里有个问题，为什么我们要用distances_tmp_buffer这个数组去存储所有的聚类中心到子向量的距离呢？我们只需要记录最近的距离就行了。比如可以写出如下简化的代码:
+```c++
+    size_t nearest_idx = 0;
+    float min_dis = HUGE_VALF;
+    //寻找最小距离的id
+    for (size_t i = 0; i < ny; i++) {
+        float current_dis = fvec_L2sqr(x, y, d);
+        if （current_dis < min_dis） {
+            min_dis =current_dis;
+            nearest_idx = i;
+        }
+        y += d;
+    }
+    return nearest_idx;
+```
+是的，这是完全正确的，但是fassi中的注释提到，设置distances_tmp_buffer是为了编译器可以进行向量化的优化，我们"简化"后的代码生成的CPU指令远远多于( significantly more than)使用distances_tmp_buffer数组，实际上更慢了。
