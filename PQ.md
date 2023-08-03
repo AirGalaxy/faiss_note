@@ -293,7 +293,8 @@ void compute_code(const ProductQuantizer& pq, const float* x, uint8_t* code) {
     }
 }
 ```
-代码的逻辑和我们上面说的PQ方法完全一致，找到最近的子向量聚类中心对应的id，然后对id进行编码。注意这里找最近的子向量并没有像Level1Quantizer一样，而是使用fvec_L2sqr_ny_nearest()去寻找。接下来我们就看下fvec_L2sqr_ny_nearest是怎么工作的。
+代码的逻辑和我们上面说的PQ方法完全一致，找到最近的子向量聚类中心对应的id，然后对id进行编码。注意这里找最近的子向量并没有像Level1Quantizer一样，而是使用fvec_L2sqr_ny_nearest()去寻找。通过名字就知道这是用L2距离的平方来当作距离远近。  
+接下来我们就看下fvec_L2sqr_ny_nearest是怎么工作的。
 ```c++
 void fvec_L2sqr_ny_ref(
         float* dis,
@@ -348,3 +349,156 @@ size_t fvec_L2sqr_ny_nearest_ref(
     return nearest_idx;
 ```
 是的，这是完全正确的，但是fassi中的注释提到，设置distances_tmp_buffer是为了编译器可以进行向量化的优化，我们"简化"后的代码生成的CPU指令远远多于( significantly more than)使用distances_tmp_buffer数组，实际上更慢了。
+
+当聚类中心的矩阵有转置形式时，计算矩阵的过程又略有不同
+```c++
+    idxm = fvec_L2sqr_ny_nearest_y_transposed(
+            //存放距离的数组，作用如上
+            distances.data(),
+            //要计算到聚类中心距离的子向量
+            xsub,
+            //转置后聚类中心矩阵的第m列子向量的起始地址
+            pq.transposed_centroids.data() + m * pq.ksub,
+            //第m列子向量聚类中心的L2范数的平方起始位置
+            pq.centroids_sq_lengths.data() + m * pq.ksub,
+            //子向量维数
+            pq.dsub,
+            //对于转置后聚类中心矩阵，对于聚类中心向量的第i维到第i+1维，要前进多少个float的距离 
+            pq.M * pq.ksub,
+            //聚类中心的个数
+            pq.ksub);
+```
+参数被透传到如下函数:
+```c++
+void fvec_L2sqr_ny_y_transposed_ref(
+        float* dis,
+        const float* x,
+        const float* y,
+        const float* y_sqlen,
+        size_t d,
+        size_t d_offset,
+        size_t ny) {
+    float x_sqlen = 0;
+    for (size_t j = 0; j < d; j++) {
+        //先计算要编码的子向量的L2范数的平方
+        x_sqlen += x[j] * x[j];
+    }
+    //依次遍历聚类中心
+    for (size_t i = 0; i < ny; i++) {
+        float dp = 0;
+        for (size_t j = 0; j < d; j++) {
+            //计算完全平方和中的交叉项
+            dp += x[j] * y[i + j * d_offset];
+        }
+        //减去交叉项，就得到L2距离
+        dis[i] = x_sqlen + y_sqlen[i] - 2 * dp;
+    }
+}
+```
+$$||a-b||^2 = ||a||^2 + ||b||^2 - \sum_{i=1}^d{a_i*b_i} $$
+其中$||a||$代表向量a的L2距离。很简单的推导，拆开用完全平方公式加一下就知道了。
+~~但为什么要这样做呢，求大佬解惑~~  
+
+我们回到compute_code的代码，现在的代码类似这样:
+```c++
+    PQEncoder encoder(code, pq.nbits);
+    for (size_t m = 0; m < pq.M; m++) {
+     ...
+     //已经得到最近的子向量聚类中心编号idmx
+        encoder.encode(idxm);
+    }
+```
+
+我们只需要看下PQEncoder的实现就行了
+```c++
+struct PQEncoder8 {
+    uint8_t* code;
+    PQEncoder8(uint8_t* code, int nbits);
+    void encode(uint64_t x);
+};
+inline void PQEncoder8::encode(uint64_t x) {
+    *code++ = (uint8_t)x;
+}
+```
+直接把x的低8位放到code中，code在构造时由外部传入，作为输出参数。PQEncoder16实现完全一致。
+通用的PQ编码器
+```c++
+inline void PQEncoderGeneric::encode(uint64_t x) {
+    //offset为初始时在reg中的偏移，一般为0,reg为uint8_t
+    //提取x中最后8位
+    reg |= (uint8_t)(x << offset);
+    //把放入reg中的部分移出x
+    x >>= (8 - offset);
+    //如果还需要编码的位数大于8，说明上面已经把reg填满了
+    if (offset + nbits >= 8) {
+        //把reg赋值给code，code指针向前移动
+        *code++ = reg;
+        //依次把x的中的数据一次8bit放入code中
+        for (int i = 0; i < (nbits - (8 - offset)) / 8; ++i) {
+            *code++ = (uint8_t)x;
+            x >>= 8;
+        }
+
+        offset += nbits;
+        //本次编码x还剩(offset&=7)个bits没有放入code中
+        offset &= 7;
+        //把x中最后不满8bit的数据放入reg中
+        //等待下次调用encode或PQEncoderGeneric析构时把reg中数据放入codes
+        reg = (uint8_t)x;
+    } else {
+        //子向量编码后不足8bit，直接更新offset就行了
+        offset += nbits;
+    }
+}
+
+inline PQEncoderGeneric::~PQEncoderGeneric() {
+    //在encode中，如果offset！=0，就代表reg中还有数据没放入，在析构时放入code
+    if (offset > 0) {
+        *code = reg;
+    }
+}
+
+```
+可以看到上面编码的过程符合我们在第一小节中说的步骤:
+1. 先找最近子向量聚类中心
+2. 挨个将1-M个子聚类中心编号放入code中
+
+上面compute_code函数的实现并没有使用assign_index去寻找最近的聚类中心，ProductQuantizer也提供了使用assign_index的版本:
+```c++
+void ProductQuantizer::compute_codes_with_assign_index(
+        const float* x,
+        uint8_t* codes,
+        size_t n) {
+            
+        }
+```
+
+
+此外，编码函数还有一个根据距离表进行量化的版本:
+```c++
+void ProductQuantizer::compute_code_from_distance_table(
+        const float* tab,
+        uint8_t* code) const {
+    PQEncoderGeneric encoder(code, nbits);
+    for (size_t m = 0; m < M; m++) {
+        float mindis = 1e20;
+        uint64_t idxm = 0;
+
+        /* Find best centroid */
+        for (size_t j = 0; j < ksub; j++) {
+            float dis = *tab++;
+            if (dis < mindis) {
+                mindis = dis;
+                idxm = j;
+            }
+        }
+
+        encoder.encode(idxm);
+    }
+}
+```
+tab为要编码的向量的子向量到各个聚类中心的距离，tab的维度为 M * ksub。  
+*(tab + m * ksub + k)的值为要编码的向量的第m个子向量到第m列子向量的第k个聚类中心的距离  
+直接按照列去遍历就可以得到编码结果
+
+#### 3.2.3 解码函数  
