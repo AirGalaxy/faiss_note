@@ -466,12 +466,59 @@ inline PQEncoderGeneric::~PQEncoderGeneric() {
 上面compute_code函数的实现并没有使用assign_index去寻找最近的聚类中心，ProductQuantizer也提供了使用assign_index的版本:
 ```c++
 void ProductQuantizer::compute_codes_with_assign_index(
+        //要编码的向量集合
         const float* x,
+        //存放编码结果的数组
         uint8_t* codes,
+        //要编码的向量个数
         size_t n) {
-            
+    //按照每列子向量的顺序，每次处理所有要编码向量在第m列的子向量
+    for (size_t m = 0; m < M; m++) {
+        //先把assign_index清空
+        assign_index->reset();
+        //把当前列的子向量聚类中心加入index中
+        assign_index->add(ksub, get_centroids(m, 0));
+
+        //每次处理的分片大小
+        size_t bs = 65536;
+        float* xslice = new float[bs * dsub];
+        ScopeDeleter<float> del(xslice);
+        idx_t* assign = new idx_t[bs];
+        ScopeDeleter<idx_t> del2(assign);
+
+        for (size_t i0 = 0; i0 < n; i0 += bs) {
+            size_t i1 = std::min(i0 + bs, n);
+            //把分片内的要编码向量的m列子向量放入xslice中
+            for (size_t i = i0; i < i1; i++) {
+                //dest每次前进dsub，x每次前进d
+                memcpy(xslice + (i - i0) * dsub,
+                       x + i * d + m * dsub,
+                       dsub * sizeof(float));
+            }
+            //检索，把最近的聚类中心的编号放入assign
+            assign_index->assign(i1 - i0, xslice, assign);
+
+            if (nbits == 8) {
+                //第i0的第m列子向量的编码起始位置
+                uint8_t* c = codes + code_size * i0 + m;
+                for (size_t i = i0; i < i1; i++) {
+                    //把聚类中心编号放入codes中
+                    *c = assign[i - i0];
+                    //走到下一个向量的同一列子向量的位置上
+                    c += M;
+                }
+            } else if (nbits == 16) {
+                //与nbits = 8 类似
+                ...
+            } else {
+              //使用PQEncoderGenenric把assign编码到codes中
+              ...
+            }
         }
+    }
+}
 ```
+compute_codes_with_assign_index提供了对n个向量进行编码的功能，在寻找最近的子向量聚类中心时，采用了assign_index来实现。其余编码过程与compute_code类似，对nbits=8、16做了优化，其余情况依然通过PQEncoderGenenric实现
 
 
 此外，编码函数还有一个根据距离表进行量化的版本:
