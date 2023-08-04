@@ -546,6 +546,144 @@ void ProductQuantizer::compute_code_from_distance_table(
 ```
 tab为要编码的向量的子向量到各个聚类中心的距离，tab的维度为 M * ksub。  
 *(tab + m * ksub + k)的值为要编码的向量的第m个子向量到第m列子向量的第k个聚类中心的距离  
-直接按照列去遍历就可以得到编码结果
+直接按照列去遍历就可以得到编码结果  
+
+到这里我们就可以分析对多个向量做量化的版本了:
+```c++
+void ProductQuantizer::compute_codes(const float* x, uint8_t* codes, size_t n) const {
+    //分批大小为product_quantizer_compute_codes_bs，默认值为256 * 1024
+    //product_quantizer_compute_codes_bs为全局变量，可以更改
+    size_t bs = product_quantizer_compute_codes_bs;
+    if (n > bs) {
+        for (size_t i0 = 0; i0 < n; i0 += bs) {
+            size_t i1 = std::min(i0 + bs, n);
+            //分批计算量化结果
+            compute_codes(x + d * i0, codes + code_size * i0, i1 - i0);
+        }
+        return;
+    }
+
+    if (dsub < 16) { 
+        //如果子向量的维数比16小
+#pragma omp parallel for
+        for (int64_t i = 0; i < n; i++)
+            //多线程调用单个向量量化函数就行了
+            compute_code(x + i * d, codes + i * code_size);
+
+        } else { 
+            //否则，使用BLAS优化将会有不错的效果
+            float* dis_tables = new float[n * ksub * M];
+            ScopeDeleter<float> del(dis_tables);
+            //调用BLAS去计算要编码的向量所有子向量到子向量聚类中心的距离
+            compute_distance_tables(n, x, dis_tables);
+
+#pragma omp parallel for
+        //按照输入要编码向量的粒度并行
+        for (int64_t i = 0; i < n; i++) {
+            uint8_t* code = codes + i * code_size;
+            const float* tab = dis_tables + i * ksub * M;
+            //通过distance_table计算最近的子向量聚类中心
+            //每个向量的编码结果放到code中
+            compute_code_from_distance_table(tab, code);
+        }
+    }
+}
+```
+
+有必要看下compute_distance_tables的实现
+```c++
+void ProductQuantizer::compute_distance_tables(
+        size_t nx,
+        const float* x,
+        float* dis_tables)  {
+    if() {
+        //如果dsub比较小就使用朴素的算法，调用avx指令集，使用openMP多线程去做
+    } else { 
+        //否则使用blas，把向量切分成子向量。调用BLAS接口
+        for (int m = 0; m < M; m++) {
+            //每次计算一列子向量的距离表
+            pairwise_L2sqr(
+                    //子向量维数
+                    dsub,
+                    //所有要进行量化的向量的个数
+                    nx,
+                    //第m个子向量起始地址
+                    x + dsub * m,
+                    //子聚类中心个数
+                    ksub,
+                    //第m列子向量的聚类中心起始地址
+                    centroids.data() + m * dsub * ksub,
+                    //第m列子向量的距离表的起始地址
+                    dis_tables + ksub * m,
+                    //完整向量的长度d，向下一个向量步进的长度
+                    d,
+                    //子向量的长度，子向量聚类中心数组中向下一个聚类中心移动的距离
+                    dsub,
+                    //一个要编码的向量需要ksub * M个float来存储距离
+                    ksub * M);
+        }
+    }
+}
+```
+pairwise_L2sqr的计算技巧在我们说fvec_L2sqr_ny_y_transposed_ref中已经说过了。
+```c++
+void pairwise_L2sqr(...) {
+    ...
+    float* b_norms = dis;
+//先计算xb L2范数的平方，放到dis中开头的第一个子向量占用的距离数组中
+#pragma omp parallel for if (nb > 1)
+    for (int64_t i = 0; i < nb; i++)
+        b_norms[i] = fvec_norm_L2sqr(xb + i * ldb, d);
+//再计算xq的L2范数的平方
+#pragma omp parallel for
+    //由于第一个向量被占用，所以先从第二个子向量开始计算L2范数的平方
+    for (int64_t i = 1; i < nq; i++) {
+        float q_norm = fvec_norm_L2sqr(xq + i * ldq, d);
+        //计算 编码子向量与子向量聚类中心的 L2范数平方之和
+        for (int64_t j = 0; j < nb; j++)
+            dis[i * ldd + j] = q_norm + b_norms[j];
+    }
+    // 处理第一个子向量的所占用的dis
+    {
+        float q_norm = fvec_norm_L2sqr(xq, d);
+        for (int64_t j = 0; j < nb; j++)
+            dis[j] += q_norm;
+    }
+
+    {
+    FINTEGER nbi = nb, nqi = nq, di = d, ldqi = ldq, ldbi = ldb,lddi = ldd;
+    float one = 1.0, minus_2 = -2.0;
+    //现在dis中的值为 编码子向量与子向量聚类中心的 L2范数平方之和
+    sgemm_("Transposed",
+           "Not transposed",
+           &nbi,
+           &nqi,
+           &di,
+           &minus_2,
+           xb,
+           &ldbi,
+           xq,
+           &ldqi,
+           &one,
+           dis,
+           &lddi);
+    }
+}
+```
+最后的sgemm_这个blas调用计算的是如下内容
+$$
+one \cdot \vec{dis} + minus\_2 \cdot \vec{xb} \cdot \vec{xq}\\ =\vec{dis} - 2 \cdot \vec{xb} \cdot \vec{xq}\\  = ||\vec{xb}||^2 +||\vec{xq}||^2 - 2 \cdot \vec{xb} \cdot \vec{xq}
+$$
+这个表达式与fvec_L2sqr_ny_y_transposed_ref中分析的完全一致  
+这里还有个小技巧，为了减少内存的分配，使用dis中存放第一个向量所占的距离数据的空间来存放xb的L2范数平方。
+
+ProductQuantizer还提供另一个计算内积距离的函数
+```c++
+void ProductQuantizer::compute_inner_prod_tables(
+        size_t nx,
+        const float* x,
+        float* dis_tables);
+```
+该函数的实现和compute_distance_tables几乎一致，这里就不分析了
 
 #### 3.2.3 解码函数  
