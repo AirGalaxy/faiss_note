@@ -97,18 +97,65 @@ void pq_knn_search_with_tables(
         }
         pq_estimators_from_tables_generic<C>(
                 pq,
+                //每个子向量占用的bit数
                 nbits,
+                //物料向量编码后的数组
                 codes,
+                //物料向量的个数
                 ncodes,
+                //query子向量到子向量聚类中心距离表
                 dis_table,
+                //搜索最近邻的k个
                 k,
+                //存放距离的堆数组
                 heap_dis,
+                //存放id的堆数组
                 heap_ids);
         
         if (init_finalize_heap) {
+            //原地做堆排序
             heap_reorder<C>(k, heap_dis, heap_ids);
         }
 
     }
  }
 ```
+pq_knn_search_with_tables中按照query粒度去并行，处理单个query的靠pq_estimators_from_tables_generic，代码如下:
+```c++
+template <class C>
+void pq_estimators_from_tables_generic(
+        const ProductQuantizer& pq,
+        size_t nbits,
+        const uint8_t* codes,
+        size_t ncodes,
+        const float* dis_table,
+        size_t k,
+        float* heap_dis,
+        int64_t* heap_ids) {
+    const size_t M = pq.M;
+    const size_t ksub = pq.ksub;
+    //按照物料向量来遍历
+    for (size_t j = 0; j < ncodes; ++j) {
+        //codes + j * pq.code_size: 指针移动到第j个物料向量起始编码位置
+        PQDecoderGeneric decoder(codes + j * pq.code_size, nbits);
+        float dis = 0;
+        const float* __restrict dt = dis_table;
+        for (size_t m = 0; m < M; m++) {
+            //从物料向量编码中解出第m列子向量聚类中心的编码
+            uint64_t c = decoder.decode();
+            //dt[c]: 取到第m列的query子向量到当前物料向量在第m列上的子向量的距离平方
+            //将子向量的距离平方加入到dis中
+            dis += dt[c];
+            //移动到同一个物料向量的下一列的子向量的距离表的起始位置
+            dt += ksub;
+        }
+        //遍历完所有子向量后，得到当前物料向量与query向量的距离的平方dis
+        if (C::cmp(heap_dis[0], dis)) {
+            //如果dis比最小的元素大，把最小的元素用当前的dis替换掉
+            heap_replace_top<C>(k, heap_dis, heap_ids, dis, j);
+        }
+    }
+}
+```
+
+
