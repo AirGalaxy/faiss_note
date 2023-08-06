@@ -160,5 +160,5 @@ void pq_estimators_from_tables_generic(
     }
 }
 ```
-pq_estimators_from_tables_generic实现了上文所述的非对称检索。
+pq_estimators_from_tables_generic实现了上文所述的非对称检索，步骤和我们在预备知识中分析的完全相同
 
