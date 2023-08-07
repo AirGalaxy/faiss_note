@@ -28,7 +28,8 @@
 由于非对称检索只进行了一次量化，所以检索精度会更高。对称检索需要对query向量做量化，但是后续查表只需要查一张表，在多个query进行检索时，只需要存储一张dis_table，所占用的内存较小
 
 ## 3. ProductQuantizer类
-接下来介绍PQ类的最后一类方法:检索方法  
+接下来介绍PQ类的最后一类方法:检索方法 
+### 非对称检索 
 下面这个方法提供了非对称检索的实现
 ```c++
     /** perform a search (L2 distance)
@@ -162,3 +163,82 @@ void pq_estimators_from_tables_generic(
 ```
 pq_estimators_from_tables_generic实现了上文所述的非对称检索，步骤和我们在预备知识中分析的完全相同
 
+### 对称检索
+ProductQuantizer类提供了对称检索的接口search_sdc。不过我们首先看下计算对称距离表的compute_sdc_table方法:
+```c++
+void ProductQuantizer::compute_sdc_table() {
+    sdc_table.resize(M * ksub * ksub);
+    ...
+    #pragma omp parallel for
+        for (int m = 0; m < M; m++) {
+            //取第m列的聚类中心的起始值
+            const float* cents = centroids.data() + m * ksub * dsub;
+            //取sdc_table的第m列的聚类中心的存放结果的起始地址
+            float* dis_tab = sdc_table.data() + m * ksub * ksub;
+            pairwise_L2sqr(
+                    //子聚类中心的维度
+                    dsub, 
+                    //我们要计算多少个子聚类中心到相同列子聚类中心的距离？
+                    ksub,
+                    //第m列子聚类中心的起始地址
+                    cents,
+                    //第m列子聚类中心的个数
+                    ksub, 
+                    //所有子聚类中心的起始地址
+                    cents, 
+                    //存放结果的数组
+                    dis_tab, 
+                    dsub, dsub, ksub);
+        }
+}
+```
+可以看到，计算对称距离表和在预备知识中分析的完全一致，按照子向量的维度进行并行的处理。在相同列中的所有子聚类中心计算其两两之间的距离并保存到dis_tab中，上文对pairwise_L2sqr已经有过分析，这里不再赘述
+
+现在我们看下search_sdc的实现:
+```c++
+void ProductQuantizer::search_sdc(
+        const uint8_t* qcodes,
+        size_t nq,
+        const uint8_t* bcodes,
+        const size_t nb,
+        float_maxheap_array_t* res,
+        bool init_finalize_heap) const {
+    //要搜索最近的k个向量
+    size_t k = res->k;
+
+#pragma omp parallel for
+    for (int64_t i = 0; i < nq; i++) {
+        //移动堆数组到第i个向量检索结果的位置
+        idx_t* heap_ids = res->ids + i * k;
+        float* heap_dis = res->val + i * k;
+        //移动query向量编码到第i个向量的位置
+        const uint8_t* qcode = qcodes + i * code_size;
+        //初始化堆
+        if (init_finalize_heap)
+            maxheap_heapify(k, heap_dis, heap_ids);
+
+        const uint8_t* bcode = bcodes;
+        //遍历物料向量
+        for (size_t j = 0; j < nb; j++) {
+            float dis = 0;
+            const float* tab = sdc_table.data();
+            //遍历子向量
+            for (int m = 0; m < M; m++) {
+                //从距离表中查出第m列子向量上query向量与第j个物料向量的距离
+                dis += tab[bcode[m] + qcode[m] * ksub];
+                tab += ksub * ksub;
+            }
+            //插入堆中
+            if (dis < heap_dis[0]) {
+                maxheap_replace_top(k, heap_dis, heap_ids, dis, j);
+            }
+            //移动到下一个物料向量
+            bcode += code_size;
+        }
+        //堆排序
+        if (init_finalize_heap)
+            maxheap_reorder(k, heap_dis, heap_ids);
+    }
+}
+```
+很朴素的实现，openMP按照query粒度并行，查表计算距离+堆排序，和预备知识中的实现相同
