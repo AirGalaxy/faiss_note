@@ -29,22 +29,22 @@ struct IndexIVFPQ : IndexIVF {
     //控制对原始物料向量量化还是对残差向量量化
     bool by_residual; 
     //乘积量化器
-    ProductQuantizer pq; ///< produces the codes
-
-    bool do_polysemous_training; ///< reorder PQ centroids after training?
-    PolysemousTraining* polysemous_training; ///< if NULL, use default
+    ProductQuantizer pq; 
+    // 参考IndexPQ，使用汉明距离对物料向量进行过滤
+    bool do_polysemous_training; 
+    PolysemousTraining* polysemous_training; 
 
     // search-time parameters
     size_t scan_table_threshold; ///< use table computation or on-the-fly?
-    int polysemous_ht;           ///< Hamming thresh for polysemous filtering
+    // 汉明门限
+    int polysemous_ht; 
 
     /** Precompute table that speed up query preprocessing at some
      * memory cost (used only for by_residual with L2 metric)
      */
     int use_precomputed_table;
 
-    /// if use_precompute_table
-    /// size nlist * pq.M * pq.ksub
+    // 内存对齐的查找表，存储预计算的聚类向量之间的距离
     AlignedTable<float> precomputed_table;
 }
 ```
