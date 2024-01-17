@@ -29,14 +29,15 @@ struct IndexIVFPQ : IndexIVF {
     //控制对原始物料向量量化还是对残差向量量化
     bool by_residual; 
     //乘积量化器
-    ProductQuantizer pq; ///< produces the codes
-
-    bool do_polysemous_training; ///< reorder PQ centroids after training?
-    PolysemousTraining* polysemous_training; ///< if NULL, use default
+    ProductQuantizer pq; 
+    // 参考IndexPQ，使用汉明距离对物料向量进行过滤
+    bool do_polysemous_training; 
+    PolysemousTraining* polysemous_training; 
 
     // search-time parameters
     size_t scan_table_threshold; ///< use table computation or on-the-fly?
-    int polysemous_ht;           ///< Hamming thresh for polysemous filtering
+    // 汉明门限
+    int polysemous_ht; 
 
     /**
      * 是否要使用预计算的距离表?只有再L2范数距离的情况下才有效，这个不解释
@@ -44,8 +45,9 @@ struct IndexIVFPQ : IndexIVF {
     int use_precomputed_table;
 
     /**
-    * 预计算的距离表，使用的还是我们熟悉的AlignedTable，字节对齐的表
-    *  大小为nlist * pq.M * pq.ksub
+    * 内存对齐的查找表，存储预计算的聚类向量之间的距离
+    * 使用的还是我们熟悉的AlignedTable，字节对齐的表
+    * 大小为nlist * pq.M * pq.ksub
     * nlist:聚类后倒排拉链的个数   
     * pq.M:PQ后一个向量被切成M个子向量
     * pq.ksub:pq后子向量的维数
