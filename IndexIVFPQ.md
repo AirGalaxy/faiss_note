@@ -38,13 +38,18 @@ struct IndexIVFPQ : IndexIVF {
     size_t scan_table_threshold; ///< use table computation or on-the-fly?
     int polysemous_ht;           ///< Hamming thresh for polysemous filtering
 
-    /** Precompute table that speed up query preprocessing at some
-     * memory cost (used only for by_residual with L2 metric)
+    /**
+     * 是否要使用预计算的距离表?只有再L2范数距离的情况下才有效，这个不解释
      */
     int use_precomputed_table;
 
-    /// if use_precompute_table
-    /// size nlist * pq.M * pq.ksub
+    /**
+    * 预计算的距离表，使用的还是我们熟悉的AlignedTable，字节对齐的表
+    *  大小为nlist * pq.M * pq.ksub
+    * nlist:聚类后倒排拉链的个数   
+    * pq.M:PQ后一个向量被切成M个子向量
+    * pq.ksub:pq后子向量的维数
+    */
     AlignedTable<float> precomputed_table;
-}
+
 ```
