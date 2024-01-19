@@ -129,8 +129,11 @@ void IndexIVFPQ::add_core_o(
     
     size_t n_ignore = 0;
     for (size_t i = 0; i < n; i++) {
+        //聚类中心编号key
         idx_t key = idx[i];
+        //物料向量唯一编号id,若外部没有输入，则使用自增id
         idx_t id = xids ? xids[i] : ntotal + i;
+        
         if (key < 0) {
             direct_map.add_single_id(id, -1, 0);
             n_ignore++;
