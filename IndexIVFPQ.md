@@ -55,3 +55,106 @@ struct IndexIVFPQ : IndexIVF {
     AlignedTable<float> precomputed_table;
 
 ```
+
+### 索引接口 
+
+添加向量:
+
+先看下父类的接口
+
+``` c++
+// xids物料的标识符
+// n本次要添加的物料向量的个数
+void IndexIVF::add_with_ids(idx_t n, const float* x, const idx_t* xids) {
+    std::unique_ptr<idx_t[]> coarse_idx(new idx_t[n]);
+    //找到物料向量属于哪一个聚类中心
+    quantizer->assign(n, x, coarse_idx.get());
+    //子类的add_core实现添加逻辑
+    add_core(n, x, xids, coarse_idx.get());
+}
+```
+
+add_core在子类IndexIVFPQ中的实现如下:
+
+```c++
+void IndexIVFPQ::add_core(
+        idx_t n,
+        const float* x,
+        const idx_t* xids,
+        const idx_t* coarse_idx) {
+    add_core_o(n, x, xids, nullptr, coarse_idx);
+}
+
+void IndexIVFPQ::add_core_o(
+        idx_t n,
+        const float* x,
+        const idx_t* xids,
+        float* residuals_2,
+        const idx_t* precomputed_idx) {
+    idx_t bs = index_ivfpq_add_core_o_bs;
+    //每批次处理index_ivfpq_add_core_o_bs(默认32768)个物料向量,代码略过
+    ...
+        
+    direct_map.check_can_add(xids);
+
+    const idx_t* idx;
+    std::unique_ptr<idx_t[]> del_idx;
+    if (precomputed_idx) {
+        idx = precomputed_idx;
+    // 如果还没计算好向量属于那个聚类中心，在这里再算一下
+    // idx为该向量所属的聚类中心/倒排拉链
+    } else {
+        idx_t* idx0 = new idx_t[n];
+        del_idx.reset(idx0);
+        quantizer->assign(n, x, idx0);
+        idx = idx0;
+    }
+    
+    // to_encode为存放要被PQ编码结果的地址
+    const float* to_encode = nullptr;
+    std::unique_ptr<const float[]> del_to_encode;
+
+    if (by_residual) {
+        //如果要对残差进行PQ，在这里计算残差
+        //计算残差就是把聚类中心编号idx先重建回原始的向量然后与物料向量x相减
+        del_to_encode = compute_residuals(quantizer, n, x, idx);
+        to_encode = del_to_encode.get();
+    } else {
+        to_encode = x;
+    }
+    //存放编码结果
+    std::unique_ptr<uint8_t[]> xcodes(new uint8_t[n * code_size]);
+    //将残差向量转换为PQ编码的向量放到xcodes中
+    pq.compute_codes(to_encode, xcodes.get(), n);
+    
+    size_t n_ignore = 0;
+    for (size_t i = 0; i < n; i++) {
+        idx_t key = idx[i];
+        idx_t id = xids ? xids[i] : ntotal + i;
+        if (key < 0) {
+            direct_map.add_single_id(id, -1, 0);
+            n_ignore++;
+            if (residuals_2)
+                memset(residuals_2, 0, sizeof(*residuals_2) * d);
+            continue;
+        }
+
+        uint8_t* code = xcodes.get() + i * code_size;
+        size_t offset = invlists->add_entry(key, id, code);
+
+        if (residuals_2) {
+            float* res2 = residuals_2 + i * d;
+            const float* xi = to_encode + i * d;
+            pq.decode(code, res2);
+            for (int j = 0; j < d; j++)
+                res2[j] = xi[j] - res2[j];
+        }
+
+        direct_map.add_single_id(id, key, offset);
+    }
+    
+}
+```
+
+
+
