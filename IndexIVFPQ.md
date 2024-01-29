@@ -122,7 +122,7 @@ void IndexIVFPQ::add_core_o(
     } else {
         to_encode = x;
     }
-    //存放编码结果
+    //xcodes为存放编码结果的对象
     std::unique_ptr<uint8_t[]> xcodes(new uint8_t[n * code_size]);
     //将残差向量转换为PQ编码的向量放到xcodes中
     pq.compute_codes(to_encode, xcodes.get(), n);
@@ -133,31 +133,32 @@ void IndexIVFPQ::add_core_o(
         idx_t key = idx[i];
         //物料向量唯一编号id,若外部没有输入，则使用自增id
         idx_t id = xids ? xids[i] : ntotal + i;
-        
+        // 没找到聚类中心
         if (key < 0) {
+            //只添加到direct_map不添加到倒排表
             direct_map.add_single_id(id, -1, 0);
+            //忽略的物料向量+1
             n_ignore++;
             if (residuals_2)
+                //2级残差的值置为0
                 memset(residuals_2, 0, sizeof(*residuals_2) * d);
             continue;
         }
-
+		// 取IVFPQ编码后的结果
         uint8_t* code = xcodes.get() + i * code_size;
+        // key:倒排拉链中心编号; id:唯一标识符; code:PQ编码
         size_t offset = invlists->add_entry(key, id, code);
 
         if (residuals_2) {
+            
             float* res2 = residuals_2 + i * d;
             const float* xi = to_encode + i * d;
             pq.decode(code, res2);
             for (int j = 0; j < d; j++)
                 res2[j] = xi[j] - res2[j];
         }
-
         direct_map.add_single_id(id, key, offset);
     }
-    
 }
 ```
-
-
-
+PS:上面代码对key<0的情况的判断没搞懂, 什么时候会出现这种情况, key<0意味着在搜索k个最近邻向量时, 只找到了小于k个最近邻向量, 没找到的位置其label就是-1。但是对于IVFPQ方法来说，理论上物料向量一定属于一个聚类中心
