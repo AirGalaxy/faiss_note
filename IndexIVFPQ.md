@@ -199,19 +199,31 @@ void IndexIVFPQ::train_residual_o(idx_t n, const float* x, float* residuals_2) {
     ScopeDeleter<float> del_residuals;
     if (by_residual) {
 		//进行残差的训练
-        //先计算物料向量对应的粗剧烈中心
+        //先计算物料向量对应的粗聚类中心
         idx_t* assign = new idx_t[n]; // assignement to coarse centroids
         ScopeDeleter<idx_t> del(assign);
+        //物料向量对应的聚类中心的编号放到assign中
         quantizer->assign(n, x, assign);
         float* residuals = new float[n * d];
         del_residuals.set(residuals);
         for (idx_t i = 0; i < n; i++)
+            //计算残差
             quantizer->compute_residual(
                     x + i * d, residuals + i * d, assign[i]);
-
+		//最终的训练集为残差
         trainset = residuals;
     } else {
         trainset = x;
     }
+    //计算残差的PQ编码, 参考PQ部分的分析
+    pq.train(n, trainset);
+    //参考IndexIVF中，计算物料向量的汉明编码，搜索时通过汉明编码的编辑距离进行粗筛
+    if (do_polysemous_training) {
+    	PolysemousTraining default_pt;
+    	PolysemousTraining* pt = polysemous_training;
+    	if (!pt)
+        	pt = &default_pt;
+    	pt->optimize_pq_for_hamming(pq, n, trainset);
+    }
+}
 ```
-
