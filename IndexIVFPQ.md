@@ -162,3 +162,56 @@ void IndexIVFPQ::add_core_o(
 }
 ```
 PS:上面代码对key<0的情况的判断没搞懂, 什么时候会出现这种情况, key<0意味着在搜索k个最近邻向量时, 只找到了小于k个最近邻向量, 没找到的位置其label就是-1。但是对于IVFPQ方法来说，理论上物料向量一定属于一个聚类中心
+
+### 训练接口
+
+直接看父类IndexIVF的对train的实现:
+
+```c++
+void IndexIVF::train(idx_t n, const float* x) {
+    if (verbose)
+        printf("Training level-1 quantizer\n");
+	// 第一次量化训练(找聚类中心)
+    train_q1(n, x, verbose, metric_type);
+
+    train_residual(n, x);
+    is_trained = true;
+}
+```
+
+代码很简单，在IndexIVFPQ中，``train_residual(n, x)``由``train_residual_o(idx_t n, const float* x, float* residuals_2)``实现:
+
+```c++
+void IndexIVFPQ::train_residual_o(idx_t n, const float* x, float* residuals_2) {
+    const float* x_in = x;
+    //可以看到这里如果用于训练的物料向量很多的话会对输入的物料向量进行了采样
+    x = fvecs_maybe_subsample(
+            d,
+        	//如果采样了的话，n也随着变化
+            (size_t*)&n,
+        	//每个聚类中心最多对应多少个物料向量 * 子量化器的个数
+            pq.cp.max_points_per_centroid * pq.ksub,
+            x,
+            verbose,
+            pq.cp.seed);
+        const float* trainset;
+    
+    ScopeDeleter<float> del_residuals;
+    if (by_residual) {
+		//进行残差的训练
+        //先计算物料向量对应的粗剧烈中心
+        idx_t* assign = new idx_t[n]; // assignement to coarse centroids
+        ScopeDeleter<idx_t> del(assign);
+        quantizer->assign(n, x, assign);
+        float* residuals = new float[n * d];
+        del_residuals.set(residuals);
+        for (idx_t i = 0; i < n; i++)
+            quantizer->compute_residual(
+                    x + i * d, residuals + i * d, assign[i]);
+
+        trainset = residuals;
+    } else {
+        trainset = x;
+    }
+```
+
