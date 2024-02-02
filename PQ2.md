@@ -1,4 +1,4 @@
-# Fassi源码阅读
+# Faiss源码阅读
 本节继续介绍PQ方法的源码
 ## 预备知识——对称检索和非对称检索
 假设我们在进行乘积量化的过程中，向量被分割为M列子向量，每列子向量有ksub个聚类中心。  
@@ -12,14 +12,14 @@
 
 **非对称检索**:  
 举个简单的例子:假定 M = 2，ksub = 4，即把向量分为两列，每列有四个聚类中心。压缩后的物料向量可能像这个样子[0,3]，其中0，1，2，3分别代表了对应列子向量聚类中心的向量。在得到query向量后，我们需要把query向量也切成两列，计算切分后的子向量与子向量剧烈中心的距离，最后得到距离表dis_table如下
-<div align=center><img src="https://github.com/AirGalaxy/fassi_note/blob/main/drawio/PQ4.drawio.png?raw=true"></div>
+<div align=center><img src="https://github.com/AirGalaxy/faiss_note/blob/main/drawio/PQ4.drawio.png?raw=true"></div>
 解释下这个表，第一行第一列代表query向量的第一列子向量与第一列子向量的第一个聚类中心的距离，其他以此类推。这样，query与物料向量[0，3]的距离应该为8+7=15。  
 
 注意一点，每次一个新的query向量到来时，我们都要重新计算dis_tables，这是显然的
 
 **对称检索**  
 同样的，假定M = 2， ksub = 4，在query来之前，我们就可以预先计算好子向量聚类中心之间的距离:
-<div align=center><img src="https://github.com/AirGalaxy/fassi_note/blob/main/drawio/PQ5.drawio.png?raw=true"></div>
+<div align=center><img src="https://github.com/AirGalaxy/faiss_note/blob/main/drawio/PQ5.drawio.png?raw=true"></div>
 解释下这个矩阵的含义，m=1代表这是切分后第一列子向量，表中第m行第n列，代表第一列子向量的第m个聚类中心与第n个聚类中心的距离的平方。于是可以看到这个矩阵是对称的(m与n的距离等于n与m的距离)，且对角线上的元素最大比其所在行和列的元素都要大(对于L2距离来说，自己与自己的距离是最大的)。   
 
 举例来说，对于一个query向量，首先调用compute_code计算出query向量乘积量化的结果[1,2]，同样计算其与物料向量[0,3]的距离，在m=1的矩阵中找到(1,0)位置上的值为6，在m=2的矩阵上找到(2,3)位置上的值为10，因此query向量[1,2]与物料向量[0,3]的距离的平方为6+10=16

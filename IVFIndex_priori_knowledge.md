@@ -1,4 +1,4 @@
-# Fassi源码阅读
+# Faiss源码阅读
 ## 1. IVF方法简述
 为了提高检索速度，我们可以牺牲一些准确度，只检索部分向量。我们希望选取离query向量近的一些向量。于是一个简单的想法是先对所有物料向量做聚类，得到N个聚类中心，在搜索时，先计算query向量与聚类中心的距离，找到最近的nlist个聚类中心，只与这nlist个聚类中心所代表的向量计算距离，找到其中最近的k个。这就是基于倒排表的向量检索方法。  
 这里的倒排表只是借用了传统的全文检索的搜索引擎中的词，可以把聚类中心理解为lucene中的倒排拉链的term，把属于该聚类中心的向量理解为倒排拉链中的doc
@@ -396,7 +396,7 @@ void ArrayInvertedLists::resize(size_t list_no, size_t new_size) {
 ### 2.3 DirectMap
 对于给定的物料的唯一标识符id，我们可以通过DirectMap在O(1)的时间内找到该物料属于的list_no和在该list_no中的offset(偏移)。内部实现为数组实现:``std::vector<idx_t>``或hash表实现``std::unordered_map<idx_t, idx_t>``。  
 如果设置类型为NoMap则不存储任何id到entry的映射  
-注意hash表的value与vector中的value类型为idx_t，64位整型，高32位为list_no，低32位为id对应的元素在invertedLists中的偏移offset，fassi中把这个64位整形称为lo，并提供了lo_build、lo_listno、lo_offset来操作lo
+注意hash表的value与vector中的value类型为idx_t，64位整型，高32位为list_no，低32位为id对应的元素在invertedLists中的偏移offset，Faiss中把这个64位整形称为lo，并提供了lo_build、lo_listno、lo_offset来操作lo
 ```c++
     // 设置用数组还是hash表，并使用invlists初始化该DirecMap
     void DirectMap::set_type(Type new_type, const InvertedLists* invlists, size_t ntotal);

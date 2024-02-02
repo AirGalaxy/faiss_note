@@ -1,4 +1,4 @@
-# Fassi源码阅读
+# Faiss源码阅读
 本节为乘积量化方法的预备知识
 ## 1. 什么是乘积量化方法
 还记得前面的IVF方法吗，里面提到量化的一个想法就是用把物料向量量化到聚类中心的向量上，但是这样做的误差太大了。可能我们有100万个向量，但是我们的聚类中心只有65536个，用65535个向量来表示100万个向量显然是不合适的。  
@@ -8,17 +8,17 @@
 假设我们的物料向量有$M$个，每个物料向量有$d$维。切分的子向量数量为N。PQ方法的步骤如下:
 1. 切分子向量  
 如下图所示，我们将原始的向量切分为了N个子向量，每个子向量$d/N$维 
-<div align=center><img src="https://github.com/AirGalaxy/fassi_note/blob/main/drawio/PQ1.drawio.png?raw=true" width="75%"></div>
+<div align=center><img src="https://github.com/AirGalaxy/faiss_note/blob/main/drawio/PQ1.drawio.png?raw=true" width="75%"></div>
 
 
 2. 子向量聚类  
 我们对子向量聚类，得到每一列子向量的聚类中心，假设一列子向量有C个聚类中心，我们对C个聚类中心进行编号1-C，记录编号到实际聚类中心的映射，称为codebook。如下图所示:
 
-<div align=center><img src="https://github.com/AirGalaxy/fassi_note/blob/main/drawio/pq2.drawio.png?raw=true" width="75%"></div>
+<div align=center><img src="https://github.com/AirGalaxy/faiss_note/blob/main/drawio/pq2.drawio.png?raw=true" width="75%"></div>
 
 3. 向量量化  
 我们对所有的子向量做聚类操作，得到所有子向量的codebook，如下图所示:
-<div align=center><img src="https://github.com/AirGalaxy/fassi_note/blob/main/drawio/pq3.jpg?raw=true" width="75%"></div>
+<div align=center><img src="https://github.com/AirGalaxy/faiss_note/blob/main/drawio/pq3.jpg?raw=true" width="75%"></div>
 
 如上图所示，我们得到了N个codebook。将每个子向量用其所属聚类中心的编号代替，这就是量化的过程。如第一个向量可以被量化为(2,43,...,87)
 
@@ -348,7 +348,7 @@ size_t fvec_L2sqr_ny_nearest_ref(
     }
     return nearest_idx;
 ```
-是的，这是完全正确的，但是fassi中的注释提到，设置distances_tmp_buffer是为了编译器可以进行向量化的优化，我们"简化"后的代码生成的CPU指令远远多于( significantly more than)使用distances_tmp_buffer数组，实际上更慢了。
+是的，这是完全正确的，但是faiss中的注释提到，设置distances_tmp_buffer是为了编译器可以进行向量化的优化，我们"简化"后的代码生成的CPU指令远远多于( significantly more than)使用distances_tmp_buffer数组，实际上更慢了。
 
 当聚类中心的矩阵有转置形式时，计算矩阵的过程又略有不同
 ```c++

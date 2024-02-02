@@ -1,4 +1,4 @@
-# Fassi源码阅读
+# Faiss源码阅读
 ## PQ检索的实现——IndexPQ类
 IndexPQ类是对PQ方法的一个实现，在介绍了ProductQuantizer类之后，IndexPQ类就很容易理解了
 简单看下IndexPQ的成员变量

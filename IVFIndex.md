@@ -1,4 +1,4 @@
-# Fassi源码阅读
+# Faiss源码阅读
 本节开始分析IVF方法的实现
 ## 1. IndexIVFInterface
 IndexIVFInterface是接口类，定义了使用IVF方法的index必须实现的方法。
@@ -45,7 +45,7 @@ virtual void search_preassigned(
 
 此外，还有一个range_search_preassigned()，该函数的参数含义和search_preassigned完全一致，只是多了一个radius参数，只要与query向量的距离在radius内的物料向量都被视作搜索结果  
 
-可以想到，Fassi中把IVF检索分为了两步。第一步是获得最近的nprobe个聚类中心对应的倒排拉链，第二步是用query向量去这些倒排拉链中去进行检索，这一步也就是search_preassigned/range_search_preassigned函数要做的事
+可以想到，Faiss中把IVF检索分为了两步。第一步是获得最近的nprobe个聚类中心对应的倒排拉链，第二步是用query向量去这些倒排拉链中去进行检索，这一步也就是search_preassigned/range_search_preassigned函数要做的事
 
 ## 2. IndexIVF
 ### 2.1 简介
@@ -74,7 +74,7 @@ IndexIVF类是一个抽象类，提供了基本IVF检索功能的实现，是Ind
     DirectMap direct_map;
 ```
 到这里成员变量大家应该很熟悉了，这里可能要解释下parallel_mode。  
-在进行IVF检索时，Fassi提供了不同粒度的并行模式  
+在进行IVF检索时，Faiss提供了不同粒度的并行模式  
 parallel_mode是一个控制并行化方式的参数。它决定了在执行查询过程中如何使用OpenMP进行并行化。
 
 * 当parallel_mode为0时，默认值，查询过程将根据查询的数量进行划分，每个查询在一个线程中执行。这种方式在处理多个查询时比较高效。
@@ -483,7 +483,7 @@ if (pmode == 2) {
         } 
 ```
 由于这里我们没有设置openMP的线程数，所以最大的并行的线程数还是会受到CPU核心数的限制。  
-可以看到，这里的search_preassigned实现了对指定倒排拉链的搜索，同时使用openMP进行可控制粒度的并行操作，当然根据fassi源码的注释中所写，最多的还是pmode=0，即query粒度的并行。
+可以看到，这里的search_preassigned实现了对指定倒排拉链的搜索，同时使用openMP进行可控制粒度的并行操作，当然根据Faiss源码的注释中所写，最多的还是pmode=0，即query粒度的并行。
 
 此外，还有range_search_preassigned方法，提供了范围检索的功能，其代码结构完全一致，只是在scan_codes时调用了scan_codes_range或iterate_codes_range方法，这里就不分析了，感兴趣的读者可以自己研究。
 
