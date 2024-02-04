@@ -20,7 +20,29 @@
 1. 进行IVF搜索，找出需要进行检索的倒排拉链；
 2. 计算query向量与聚类中心的残差，通过PQ搜索找到与query残差最近的k个物料残差，PQ搜索我们在PQ章节中已经分析过源码了。  
 
-现在，我们可以来看看Faiss中IVFPQ的实现了
+### 预计算距离表
+
+如果使用非对称检索，我们需要计算的是什么呢？
+
+记物料向量为$$Y_b$$，在IVFPQ编码后，$$Y_b$$所属的聚类中心为$$Y_c$$,  $$Y_b$$的残差为$$Y_r$$ ，则
+
+$Y_b = Y_c+Y_r$
+
+记query向量为$$x$$
+
+在使用L2距离的情况下, query向量与物料向量的距离为:
+
+$D(x,Y_b) = ||x - Y_b||^2 = ||x - Y_c-Y_r||^2 = ||x-Y_c||^2+||Y_r||^2 - 2(x-Y_c)\cdot Y_r $
+
+$=||x-Y_c||^2+||Y_r||^2 +2(Y_c \cdot Y_r) - 2(x \cdot Y_r)$
+
+我们记$$||x-Y_c||^2$$为第一项，$$||Y_r||^2 +2(Y_c \cdot Y_r) $$为第二项，$$x \cdot Y_r$$为第三项
+
+考察第一项:该项为query向量到物料中心的距离，这个距离第一步IVF搜索的过程中已经计算出来了
+
+第二项:该项与query向量无关，因此可以预先计算。对于一个物料向量，计算该项需要的内存：对于每个聚类中心，切分后的子向量有M * ksub中取值的可能，有nlist个聚类中心，故占用内存为sizeof(double) * nlist * M * ksub，这个内存开销是很大的。因此可以看到use_precomputed_table是默认关闭。这一项要计算的其实就是在PQ章节我们提到过的对称检索时要计算的距离表
+
+第三项:该项与query有关，不能预先计算，因此这部分开销是必须要计算的，但是，如果物料向量很多，超过了ksub*M个，我们也可以计算预计算query向量的子向量与子向量聚类中心的距离表，这个距离表其实就是我们在PQ章节提到的非对称检索时要计算的距离表。
 
 ## IndexIVFPQ类
 ### 成员变量与构造函数
@@ -227,3 +249,93 @@ void IndexIVFPQ::train_residual_o(idx_t n, const float* x, float* residuals_2) {
     }
 }
 ```
+
+
+
+### 解/编码接口
+
+编码函数
+
+``` c++
+void IndexIVFPQ::encode(idx_t key, const float* x, uint8_t* code) const {
+    if (by_residual) {
+        //计算残差，d为原始物料向量的维数
+        std::vector<float> residual_vec(d);
+        //计算残差
+        quantizer->compute_residual(x, residual_vec.data(), key);
+        //计算PQ编码的结果，放到code中
+        pq.compute_code(residual_vec.data(), code);
+    } else
+        pq.compute_code(x, code);
+}
+```
+
+编码函数很简单，``pq.compute_code``可以参考[PQ编码实现](PQ1.md#3.3.2)。这里需要注意一点，这个函数没有把list_no也就是聚类中心编号编码进去
+
+批量编码函数
+
+```c++
+void IndexIVFPQ::encode_vectors(
+        idx_t n,
+        const float* x,
+        const idx_t* list_nos,
+        uint8_t* codes,
+        bool include_listnos) const {
+    if (by_residual) {
+        float* to_encode = compute_residuals(quantizer, n, x, list_nos);
+        ScopeDeleter<float> del(to_encode);
+        pq.compute_codes(to_encode, codes, n);
+    } else {
+        pq.compute_codes(x, codes, n);
+    }
+
+    if (include_listnos) {
+        size_t coarse_size = coarse_code_size();
+        for (idx_t i = n - 1; i >= 0; i--) {
+            //指针移动到当前物料向量对应的编码地址
+            uint8_t* code = codes + i * (coarse_size + code_size);
+            //移动PQ编码的结果到对应位置，可以看到，这里是在开头预留了粗聚类中心的编码结果的空间
+            memmove(code + coarse_size, codes + i * code_size, code_size);
+            //编码粗聚类中心
+            encode_listno(list_nos[i], code);
+        }
+    }
+}
+```
+
+实现不赘述，只需注意到，这里的编码结果中记录了粗聚类中心的位置，且粗聚类中心的编码在整个编码的起始地址
+
+批量解码接口
+
+```c++
+void IndexIVFPQ::sa_decode(idx_t n, const uint8_t* codes, float* x) const {
+    //粗聚类中心的编码所占的bit数
+    size_t coarse_size = coarse_code_size();
+
+#pragma omp parallel
+    {
+    
+        std::vector<float> residual(d);
+
+#pragma omp for
+        for (idx_t i = 0; i < n; i++) {
+            const uint8_t* code = codes + i * (code_size + coarse_size);
+            //解码粗聚类中心
+            int64_t list_no = decode_listno(code);
+            float* xi = x + i * d;
+            //解码残差，并将结果放到xi中
+            pq.decode(code + coarse_size, xi);
+            if (by_residual) {
+                //重建粗聚类中心对应的向量
+                quantizer->reconstruct(list_no, residual.data());
+                for (size_t j = 0; j < d; j++) {
+                    //xi[j]为残差向量,residual[j]为粗聚类中心对应的向量
+                    xi[j] += residual[j];
+                }
+            }
+        }
+    }
+}
+```
+
+吐槽下这里的命名,``std::vector<float> residual(d)``存储的并不是残差，而是粗聚类中心对应的向量，实在是不知道为什么要这样命名
