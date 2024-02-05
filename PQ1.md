@@ -741,3 +741,132 @@ void decode(const ProductQuantizer& pq, const uint8_t* code, float* x) {
 }
 ```
 PQDecoderGeneric::decode()就是上文encode()的逆过程，简而言之就是从code数组中取出nbits位的数据转换位uint64_t返回，这里不再详细描述。
+
+## 4.MultiIndexQuantizer
+
+这里要提一下MultiIndexQuantizer, 这个类在后续的IndexIVFPQ类中有使用我们先看下这个这个类的声明
+
+```c++
+struct MultiIndexQuantizer : Index {
+    //上面提到的乘积量化器
+    ProductQuantizer pq;
+    MultiIndexQuantizer(
+            int d,         ///< dimension of the input vectors
+            size_t M,      ///< number of subquantizers
+            size_t nbits); ///< number of bit per subvector index
+    void train(idx_t n, const float* x) override;
+
+    void search(
+            idx_t n,
+            const float* x,
+            idx_t k,
+            float* distances,
+            idx_t* labels,
+            const SearchParameters* params = nullptr) const override;
+
+    /// add and reset will crash at runtime
+    void add(idx_t n, const float* x) override;
+    void reset() override;
+
+    MultiIndexQuantizer() {}
+
+    void reconstruct(idx_t key, float* recons) const override;
+};
+```
+
+可以看到MultiIndexQuantizer是一个Index，自然可以训练和search，但是不支持add和reset。这个类的作用是记录所有PQ量化后的子向量的聚类中心，其search接口实现了将批量输入的物料向量进行PQ量化的功能
+
+### 4.1 训练接口
+
+```c++
+void MultiIndexQuantizer::train(idx_t n, const float* x) {
+    pq.verbose = verbose;
+    pq.train(n, x);
+    is_trained = true;
+    // 计算有多少个虚拟的物料向量
+    ntotal = 1;
+    for (int m = 0; m < pq.M; m++)
+        ntotal *= pq.ksub;
+}
+```
+
+本质上就是对ProductQuantizer进行训练。
+
+上面提到MultiIndexQuantizer不支持add和reset，那我们要搜索的物料向量是什么呢？实际上我们并没有存储物料向量，物料向量是虚拟的，其取值范围是PQ后每一维子向量对应的所有聚类中心所有可能组合，即M个子量化器(M个维度)上的聚类中心形成的笛卡尔积。可以想到虚拟物料向量的个数为$$ksub^M$$(M个维度，每个维度有ksub个取值可能)个，这也就是上面的``ntotal``的计算逻辑。这里也很容易明白为什么MultiIndexQuantizer不支持add和reset方法了。
+
+### 4.2 搜索接口
+
+```c++
+//按照multi_index_quantizer_search_bs的数量为一批进行搜索
+int multi_index_quantizer_search_bs = 32768;
+void MultiIndexQuantizer::search(
+        idx_t n,
+        const float* x,
+        idx_t k,
+        float* distances,
+        idx_t* labels,
+        const SearchParameters* params) const {
+    //分批搜索的逻辑略过
+    ...
+    float* dis_tables = new float[n * pq.ksub * pq.M];
+    ScopeDeleter<float> del(dis_tables);
+    //计算距离表(query子向量到子量化器聚类中心的距离表)
+    pq.compute_distance_tables(n, x, dis_tables);
+        if (k == 1) {
+        // 如果我们只要找到最近虚拟物料向量
+//按照query向量粒度并行
+#pragma omp parallel for
+        for (int i = 0; i < n; i++) {
+            //对于一个query向量，跳转到距离表的位置
+            const float* dis_table = dis_tables + i * pq.ksub * pq.M;
+            float dis = 0;
+            idx_t label = 0;
+			//只需要每个子维度上的距离最小的聚类中心即可
+            for (int s = 0; s < pq.M; s++) {
+                float vmin = HUGE_VALF;
+                idx_t lmin = -1;
+                for (idx_t j = 0; j < pq.ksub; j++) {
+                    if (dis_table[j] < vmin) {
+                        vmin = dis_table[j];
+                        lmin = j;
+                    }
+                }
+                dis += vmin;
+                //记录当前子维度的最小距离对应的聚类中心编号
+                label |= lmin << (s * pq.nbits);
+                //移动距离表指针到下一个query向量的位置
+                dis_table += pq.ksub;
+            }
+            distances[i] = dis;
+            labels[i] = label;
+        }
+    } else {
+#pragma omp parallel if (n > 1)
+        {
+            //在k>1的情况下，使用MinSumK这个泛型类计算topK问题
+            MinSumK<float, SemiSortedArray<float>, false> msk(
+                    k, pq.M, pq.nbits, pq.ksub);
+//这里的并行粒度也是query向量的等级
+#pragma omp for
+            for (int i = 0; i < n; i++) {
+                msk.run(dis_tables + i * pq.ksub * pq.M,
+                        pq.ksub,
+                        distances + i * k,
+                        labels + i * k);
+            }
+        }
+    }
+}
+```
+
+这部分的代码结构也比较的清晰，如果我们只需要计算距离最近的物料向量，只需要遍历距离表，找到每个聚类中心的距离最小的子向量即可。对于k>0的情况，使用了MinSumK这个模板类来计算M*ksub的距离表中组合可能的最小的k个值。这里不详细介绍MinSumK这个类，大致介绍下计算的流程
+
+step1.初始化，``sxx[M][ksub]`` 为排序后的距离表(该距离表只排了前k个元素)。计算M维对应的最小距离的和sum，并将每个维度的第1个距离与第0个距离的差值及其对应的编号(1~M)插入堆中
+
+step2. pop出堆中最小的元素，将其编号与当前最小的组合编码合并，得到搜索的结果
+
+step3. 计算M维中每一维当前距离与上一个push入堆的距离的差值diff，将diff push到堆中
+
+step4. 重复step2、step3，直到取到最小的k个组合编码，返回结果
+
+这里的sxx在源码中用的是``std::vector<SemiSortedArray<float>> ssx``来存储的，``SemiSortedArray``为只排序最小k个的数组。

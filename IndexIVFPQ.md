@@ -42,7 +42,7 @@ $=||x-Y_c||^2+||Y_r||^2 +2(Y_c \cdot Y_r) - 2(x \cdot Y_r)$
 
 第二项:该项与query向量无关，因此可以预先计算。对于一个物料向量，计算该项需要的内存：对于每个聚类中心，切分后的子向量有M * ksub中取值的可能，有nlist个聚类中心，故占用内存为sizeof(double) * nlist * M * ksub，这个内存开销是很大的。因此可以看到use_precomputed_table是默认关闭。这一项要计算的其实就是在PQ章节我们提到过的对称检索时要计算的距离表
 
-第三项:该项与query有关，不能预先计算，因此这部分开销是必须要计算的，但是，如果物料向量很多，超过了ksub*M个，我们也可以计算预计算query向量的子向量与子向量聚类中心的距离表，这个距离表其实就是我们在PQ章节提到的非对称检索时要计算的距离表。
+第三项:该项与query有关，不能预先计算，因此这部分开销是必须要计算的，但是，如果物料向量很多，超过了ksub*M个(可以思考下为什么)，我们也可以计算预计算query向量的子向量与子向量聚类中心的距离表，这个距离表其实就是我们在PQ章节提到的非对称检索时要计算的距离表。
 
 ## IndexIVFPQ类
 ### 成员变量与构造函数
@@ -303,7 +303,7 @@ void IndexIVFPQ::encode_vectors(
 }
 ```
 
-实现不赘述，只需注意到，这里的编码结果中记录了粗聚类中心的位置，且粗聚类中心的编码在整个编码的起始地址
+实现不赘述，只需注意到，这里的编码结果中记录了粗聚类中心的位置，且粗聚类中心的编码在整个编码结果的起始地址
 
 批量解码接口
 
@@ -314,9 +314,7 @@ void IndexIVFPQ::sa_decode(idx_t n, const uint8_t* codes, float* x) const {
 
 #pragma omp parallel
     {
-    
         std::vector<float> residual(d);
-
 #pragma omp for
         for (idx_t i = 0; i < n; i++) {
             const uint8_t* code = codes + i * (code_size + coarse_size);
@@ -339,3 +337,35 @@ void IndexIVFPQ::sa_decode(idx_t n, const uint8_t* codes, float* x) const {
 ```
 
 吐槽下这里的命名,``std::vector<float> residual(d)``存储的并不是残差，而是粗聚类中心对应的向量，实在是不知道为什么要这样命名
+
+### 预计算距离表
+
+```c++
+
+void initialize_IVFPQ_precomputed_table(
+        int& use_precomputed_table,
+        const Index* quantizer,
+        const ProductQuantizer& pq,
+        AlignedTable<float>& precomputed_table,
+        bool by_residual,
+        bool verbose);
+```
+
+use_precomputed_table = -1时不计算距离表
+
+use_precomputed_table = 0时启发式的决定:在距离为L2且距离表的大小小于precomputed_tables_max_bytes(默认值2G)时，进行距离表计算
+
+接下来看下其实现
+
+```c++
+void initialize_IVFPQ_precomputed_table(
+        int& use_precomputed_table,
+        const Index* quantizer,
+        const ProductQuantizer& pq,
+        AlignedTable<float>& precomputed_table,
+        bool by_residual,
+        bool verbose) {
+    size_t nlist = quantizer->ntotal;
+    size_t d = quantizer->d;
+}
+```
