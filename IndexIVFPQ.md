@@ -40,7 +40,7 @@ $=||x-Y_c||^2+||Y_r||^2 +2(Y_c \cdot Y_r) - 2(x \cdot Y_r)$
 
 考察第一项:该项为query向量到物料中心的距离，这个距离第一步IVF搜索的过程中已经计算出来了
 
-第二项:该项与query向量无关，因此可以预先计算。对于一个物料向量，计算该项需要的内存：对于每个聚类中心，切分后的子向量有M * ksub中取值的可能，有nlist个聚类中心，故占用内存为sizeof(double) * nlist * M * ksub，这个内存开销是很大的。因此可以看到use_precomputed_table是默认关闭。这一项要计算的其实就是在PQ章节我们提到过的对称检索时要计算的距离表
+第二项:该项与query向量无关，注意到物料向量的取值范围是确定的(每个子向量取值有ksub种可能)，因此可以预先计算。对于一个物料向量，计算该项需要的内存：对于每个聚类中心，切分后的子向量有M * ksub中取值的可能，有nlist个聚类中心，故占用内存为sizeof(double) * nlist * M * ksub，这个内存开销是很大的。因此可以看到use_precomputed_table是默认关闭。这一项要计算的其实就是在PQ章节我们提到过的对称检索时要计算的距离表
 
 第三项:该项与query有关，不能预先计算，因此这部分开销是必须要计算的，但是，如果物料向量很多，超过了ksub*M个(可以思考下为什么)，我们也可以计算预计算query向量的子向量与子向量聚类中心的距离表，这个距离表其实就是我们在PQ章节提到的非对称检索时要计算的距离表。
 
@@ -247,6 +247,25 @@ void IndexIVFPQ::train_residual_o(idx_t n, const float* x, float* residuals_2) {
         	pt = &default_pt;
     	pt->optimize_pq_for_hamming(pq, n, trainset);
     }
+    
+    //计算二级残差，结果放到residuals_2中
+    if (residuals_2) {
+        uint8_t* train_codes = new uint8_t[pq.code_size * n];
+        ScopeDeleter<uint8_t> del(train_codes);
+        pq.compute_codes(trainset, train_codes, n);
+
+        for (idx_t i = 0; i < n; i++) {
+            const float* xx = trainset + i * d;
+            float* res = residuals_2 + i * d;
+            pq.decode(train_codes + i * pq.code_size, res);
+            for (int j = 0; j < d; j++)
+                res[j] = xx[j] - res[j];
+        }
+    }
+	//预计算距离表，具体实现可以参考下面的分析
+    if (by_residual) {
+        precompute_table();
+    }
 }
 ```
 
@@ -360,12 +379,77 @@ use_precomputed_table = 0时启发式的决定:在距离为L2且距离表的大�
 ```c++
 void initialize_IVFPQ_precomputed_table(
         int& use_precomputed_table,
+    	//quantizer为粗聚类中心的量化器
         const Index* quantizer,
+    	//残差的乘积量化器
         const ProductQuantizer& pq,
         AlignedTable<float>& precomputed_table,
         bool by_residual,
         bool verbose) {
+    //如果不是L2距离或不是残差PQ直接返回
+    ...
     size_t nlist = quantizer->ntotal;
     size_t d = quantizer->d;
+    //判断用哪个预计算距离表的策略
+    const MultiIndexQuantizer* miq =
+         dynamic_cast<const MultiIndexQuantizer*>(quantizer);
+    if (miq && pq.M % miq->pq.M == 0)
+    	use_precomputed_table = 2;
+	else {
+        //占用内存超过precomputed_table_max_bytes(默认2G),不进行距离表的计算
+        size_t table_size = pq.M * pq.ksub * nlist * sizeof(float);
+		if (table_size > precomputed_table_max_bytes) {
+    		return;
+		}
+		use_precomputed_table = 1;
+    }
+    //计算子向量聚类中心的L2范数
+    std::vector<float> r_norms(pq.M * pq.ksub, NAN);
+    for (int m = 0; m < pq.M; m++)
+        for (int j = 0; j < pq.ksub; j++)
+            r_norms[m * pq.ksub + j] =
+                    fvec_norm_L2sqr(pq.get_centroids(m, j), pq.dsub);
+	if (use_precomputed_table == 1) {
+        //nlist * pq.M * pq.ksub为所有子聚类中心的个数
+    	precomputed_table.resize(nlist * pq.M * pq.ksub);
+    	std::vector<float> centroid(d);
+    	for (size_t i = 0; i < nlist; i++) {
+			//计算Y_c
+        	quantizer->reconstruct(i, centroid.data());
+        	float* tab = &precomputed_table[i * pq.M * pq.ksub];
+            //计算Y_c和Y_r的所有可能取值的点积
+        	pq.compute_inner_prod_table(centroid.data(), tab);
+            //计算的是第二项
+        	fvec_madd(pq.M * pq.ksub, r_norms.data(), 2.0, tab, tab);
+    	}
+    } else if (use_precomputed_table == 2) {
+                const MultiIndexQuantizer* miq =
+                dynamic_cast<const MultiIndexQuantizer*>(quantizer);
+        const ProductQuantizer& cpq = miq->pq;
+        precomputed_table.resize(cpq.ksub * pq.M * pq.ksub);
+
+        // reorder PQ centroid table
+        std::vector<float> centroids(d * cpq.ksub, NAN);
+		//拷贝粗聚类中心的向量到centroids中
+        for (int m = 0; m < cpq.M; m++) {
+            for (size_t i = 0; i < cpq.ksub; i++) {
+                memcpy(centroids.data() + i * d + m * cpq.dsub,
+                       cpq.get_centroids(m, i),
+                       sizeof(*centroids.data()) * cpq.dsub);
+            }
+        }
+		//计算所有粗聚类中心与PQ的子向量的点积
+        //即Y_c \cdot Y_r这一项
+        pq.compute_inner_prod_tables(
+                cpq.ksub, centroids.data(), precomputed_table.data());
+		//计算第二项
+        for (size_t i = 0; i < cpq.ksub; i++) {
+            float* tab = &precomputed_table[i * pq.M * pq.ksub];
+            fvec_madd(pq.M * pq.ksub, r_norms.data(), 2.0, tab, tab);
+        }
+    }
+    
 }
 ```
+
+可以看到如果满足，计算预计算距离表的条件，我们计算的是本节开头预计算距离表中我们所说的第二项
